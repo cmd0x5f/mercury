@@ -1,0 +1,27 @@
+# Basketball Winning Margin Predictor Settings
+
+nba:
+  seasons:
+    - "2022-23"
+    - "2023-24"
+    - "2024-25"
+  season_type: "Regular Season"
+
+model:
+  elo_k_factor: 20
+  elo_start: 1500
+  rolling_window: 10
+  train_min_games: 500
+
+betting:
+  edge_threshold: 0.05        # 5% minimum edge
+  kelly_fraction: 0.25        # 1/4 Kelly
+  min_stake_pct: 0.005        # 0.5% of bankroll
+  max_stake_pct: 0.03         # 3% of bankroll
+  max_exposure_pct: 0.15      # 15% total exposure
+  stop_loss_drawdown: 0.25    # pause at 25% drawdown
+  default_bankroll: 10000
+
+sportsplus:
+  base_url: "https://www.sportsplus.ph"
+  basketball_path: "/sbk/2/upcoming"

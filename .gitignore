@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# Data (large/generated files)
+data/sportsbetting.db
+data/models/*.pkl
+data/raw/
+data/processed/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Linting
+.ruff_cache/
+
+# Testing
+.pytest_cache/
+htmlcov/
+.coverage
+
+# Snapshots (development artifacts)
+snapshot*.txt
+
+# Jupyter
+.ipynb_checkpoints/
