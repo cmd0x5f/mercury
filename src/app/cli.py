@@ -41,8 +41,11 @@ def collect(seasons):
 
 @main.command("collect-leagues")
 @click.option("--headless/--no-headless", default=True)
-@click.option("--clicks", "-c", default=5, help="'Show more' clicks per league")
-def collect_leagues(headless, clicks):
+@click.option("--clicks", "-c", default=20, help="Max 'Show more' clicks per league (stops early when exhausted)")
+@click.option("--parallel", "-p", default=1, help="Number of leagues to scrape concurrently")
+@click.option("--seasons", "-s", default=0, help="Number of past seasons to also scrape (0=current only)")
+@click.option("--incremental/--full", default=False, help="Skip re-scraping games already in DB")
+def collect_leagues(headless, clicks, parallel, seasons, incremental):
     """Scrape historical results from Flashscore for all mapped leagues."""
     from src.data.flashscore_scraper import scrape_leagues_sync
     from src.data.league_matcher import LeagueMatcher
@@ -55,8 +58,15 @@ def collect_leagues(headless, clicks):
         click.echo("No Flashscore URLs configured in league_mappings.yaml")
         sys.exit(1)
 
-    click.echo(f"Scraping {len(urls)} leagues from Flashscore...")
-    df = scrape_leagues_sync(urls, headless=headless, load_more_clicks=clicks, store=store)
+    mode = "incremental" if incremental else "full"
+    season_msg = f" + {seasons} past season(s)" if seasons else ""
+    para_msg = f" ({parallel}x parallel)" if parallel > 1 else ""
+    click.echo(f"Scraping {len(urls)} leagues from Flashscore [{mode}]{season_msg}{para_msg}...")
+
+    df = scrape_leagues_sync(
+        urls, headless=headless, max_clicks=clicks, store=store,
+        concurrency=parallel, seasons=seasons, incremental=incremental,
+    )
 
     if df.empty:
         click.echo("No games scraped")

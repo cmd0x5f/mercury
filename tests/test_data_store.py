@@ -65,6 +65,32 @@ class TestDataStore:
         recent = store.get_games(min_date="2024-01-02")
         assert len(recent) == 2
 
+    def test_upsert_returns_new_count(self, store, sample_games):
+        new1 = store.upsert_games(sample_games)
+        assert new1 == 3
+        # Second upsert with same data — 0 new
+        new2 = store.upsert_games(sample_games)
+        assert new2 == 0
+
+    def test_get_latest_dates_by_league(self, store):
+        games = pd.DataFrame([
+            {"source": "fs", "league": "NBA", "game_id": "n1",
+             "date": "2024-01-01", "home_team": "A", "away_team": "B",
+             "home_score": 100, "away_score": 90},
+            {"source": "fs", "league": "NBA", "game_id": "n2",
+             "date": "2024-01-05", "home_team": "A", "away_team": "B",
+             "home_score": 100, "away_score": 90},
+            {"source": "fs", "league": "Euroleague", "game_id": "e1",
+             "date": "2024-01-03", "home_team": "C", "away_team": "D",
+             "home_score": 80, "away_score": 70},
+        ])
+        store.upsert_games(games)
+        latest = store.get_latest_dates_by_league()
+        assert latest == {"NBA": "2024-01-05", "Euroleague": "2024-01-03"}
+
+    def test_get_latest_dates_empty_db(self, store):
+        assert store.get_latest_dates_by_league() == {}
+
     def test_upsert_and_retrieve_odds(self, store):
         odds_df = pd.DataFrame([
             {"scraped_at": "2024-01-01T10:00:00", "source": "sportsplus",

@@ -78,11 +78,14 @@ class DataStore:
         finally:
             conn.close()
 
-    def upsert_games(self, df: pd.DataFrame):
-        """Insert games, skipping duplicates. Expects columns:
+    def upsert_games(self, df: pd.DataFrame) -> int:
+        """Insert games, skipping duplicates. Returns count of newly inserted rows.
+
+        Expects columns:
         source, league, game_id, date, home_team, away_team, home_score, away_score
         """
         with self._conn() as conn:
+            before = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
             df.to_sql("_games_staging", conn, if_exists="replace", index=False)
             conn.execute("""
                 INSERT OR IGNORE INTO games
@@ -91,6 +94,16 @@ class DataStore:
                 FROM _games_staging
             """)
             conn.execute("DROP TABLE IF EXISTS _games_staging")
+            after = conn.execute("SELECT COUNT(*) FROM games").fetchone()[0]
+            return after - before
+
+    def get_latest_dates_by_league(self) -> dict[str, str]:
+        """Return {league_name: latest_date} for all leagues in the database."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT league, MAX(date) FROM games GROUP BY league"
+            ).fetchall()
+            return {row[0]: row[1] for row in rows}
 
     def get_games(self, league: str = None, min_date: str = None) -> pd.DataFrame:
         query = "SELECT * FROM games WHERE 1=1"

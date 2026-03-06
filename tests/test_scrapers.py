@@ -17,6 +17,10 @@ from playwright.async_api import async_playwright
 
 from src.data.flashscore_scraper import (
     _parse_flashscore_date,
+    _results_url_to_archive_url,
+    _retry_async,
+    _wait_for_selector_safe,
+    discover_season_urls,
     scrape_league_results,
     scrape_multiple_leagues,
 )
@@ -27,7 +31,7 @@ from src.data.sportsplus_scraper import (
     scrape_margin_odds,
 )
 
-# ── Flashscore date parsing ──────────────────────────────────────
+# -- Flashscore date parsing --------------------------------------------------
 
 
 class TestParseFlashscoreDate:
@@ -35,7 +39,7 @@ class TestParseFlashscoreDate:
         assert _parse_flashscore_date("05.03.2026") == "2026-03-05"
 
     def test_date_no_year(self):
-        """Flashscore sometimes omits year — defaults to current year."""
+        """Flashscore sometimes omits year -- defaults to current year."""
         result = _parse_flashscore_date("05.03.")
         expected_year = str(datetime.now().year)
         assert result == f"{expected_year}-03-05"
@@ -54,7 +58,108 @@ class TestParseFlashscoreDate:
         assert result == datetime.now().strftime("%Y-%m-%d")
 
 
-# ── SportsPlus bucket pattern regex ──────────────────────────────
+# -- Retry logic ---------------------------------------------------------------
+
+
+class TestRetryAsync:
+    @pytest.mark.asyncio
+    async def test_succeeds_first_try(self):
+        fn = AsyncMock(return_value=42)
+        result = await _retry_async(fn, retries=3, base_delay=0.01)
+        assert result == 42
+        assert fn.call_count == 1
+
+    @pytest.mark.asyncio
+    async def test_succeeds_after_retries(self):
+        fn = AsyncMock(side_effect=[Exception("fail"), Exception("fail"), 99])
+        result = await _retry_async(fn, retries=3, base_delay=0.01)
+        assert result == 99
+        assert fn.call_count == 3
+
+    @pytest.mark.asyncio
+    async def test_exhausts_retries(self):
+        fn = AsyncMock(side_effect=Exception("always fails"))
+        with pytest.raises(Exception, match="always fails"):
+            await _retry_async(fn, retries=2, base_delay=0.01)
+        assert fn.call_count == 3  # initial + 2 retries
+
+
+# -- Wait for selector safe ----------------------------------------------------
+
+
+class TestWaitForSelectorSafe:
+    @pytest.mark.asyncio
+    async def test_returns_true_when_found(self):
+        page = AsyncMock()
+        page.wait_for_selector = AsyncMock(return_value=True)
+        assert await _wait_for_selector_safe(page, ".foo") is True
+
+    @pytest.mark.asyncio
+    async def test_returns_false_on_timeout(self):
+        page = AsyncMock()
+        page.wait_for_selector = AsyncMock(side_effect=Exception("timeout"))
+        assert await _wait_for_selector_safe(page, ".foo") is False
+
+
+# -- Archive URL conversion ----------------------------------------------------
+
+
+class TestArchiveUrl:
+    def test_results_to_archive(self):
+        url = "https://www.flashscore.com/basketball/usa/nba/results/"
+        assert _results_url_to_archive_url(url) == (
+            "https://www.flashscore.com/basketball/usa/nba/archive/"
+        )
+
+    def test_results_no_trailing_slash(self):
+        url = "https://www.flashscore.com/basketball/europe/euroleague/results"
+        assert _results_url_to_archive_url(url) == (
+            "https://www.flashscore.com/basketball/europe/euroleague/archive/"
+        )
+
+
+# -- Season discovery ----------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_discover_season_urls_returns_past_seasons():
+    """discover_season_urls extracts past season URLs from archive page."""
+    page = AsyncMock(spec=[])
+    mock_response = AsyncMock()
+    mock_response.status = 200
+    page.goto = AsyncMock(return_value=mock_response)
+    page.wait_for_timeout = AsyncMock()
+    page.evaluate = AsyncMock(return_value=[
+        "https://www.flashscore.com/basketball/usa/nba/",           # current
+        "https://www.flashscore.com/basketball/usa/nba-2024-2025/", # past 1
+        "https://www.flashscore.com/basketball/usa/nba-2023-2024/", # past 2
+        "https://www.flashscore.com/basketball/usa/nba-2022-2023/", # past 3
+    ])
+
+    urls = await discover_season_urls(
+        page,
+        "https://www.flashscore.com/basketball/usa/nba/results/",
+        num_seasons=2,
+    )
+
+    assert len(urls) == 2
+    assert urls[0] == "https://www.flashscore.com/basketball/usa/nba-2024-2025/results/"
+    assert urls[1] == "https://www.flashscore.com/basketball/usa/nba-2023-2024/results/"
+
+
+@pytest.mark.asyncio
+async def test_discover_season_urls_empty_on_failure():
+    """discover_season_urls returns empty list on navigation failure."""
+    page = AsyncMock(spec=[])
+    mock_response = AsyncMock()
+    mock_response.status = 404
+    page.goto = AsyncMock(return_value=mock_response)
+
+    urls = await discover_season_urls(page, "https://example.com/results/")
+    assert urls == []
+
+
+# -- SportsPlus bucket pattern regex -------------------------------------------
 
 
 class TestBucketPattern:
@@ -81,20 +186,30 @@ class TestBucketPattern:
         assert BUCKET_PATTERN.match("Any Team") is None
 
 
-# ── Flashscore scraper with mocked Playwright ────────────────────
+# -- Flashscore scraper with mocked Playwright ---------------------------------
 
 
 def _make_mock_page(evaluate_return=None):
     """Create a mock Playwright page with common async methods."""
-    page = AsyncMock()
-    page.goto = AsyncMock()
+    page = AsyncMock(spec=[])  # spec=[] prevents auto-attribute generation
+    # goto returns a response object
+    mock_response = AsyncMock()
+    mock_response.status = 200
+    page.goto = AsyncMock(return_value=mock_response)
     page.wait_for_timeout = AsyncMock()
+    page.wait_for_selector = AsyncMock()
     page.evaluate = AsyncMock(return_value=evaluate_return or [])
+    page.close = AsyncMock()
     page.locator = MagicMock()
+
     # Cookie banner not visible
     mock_btn = AsyncMock()
     mock_btn.is_visible = AsyncMock(return_value=False)
+    mock_btn.count = AsyncMock(return_value=0)
+    mock_btn.first = mock_btn
+    mock_btn.scroll_into_view_if_needed = AsyncMock()
     page.locator.return_value = mock_btn
+
     return page
 
 
@@ -123,7 +238,7 @@ async def test_scrape_league_results_basic():
 
     df = await scrape_league_results(
         page, "https://flashscore.com/basketball/spain/acb/results/",
-        "Spain ACB", load_more_clicks=0,
+        "Spain ACB", max_clicks=0,
     )
 
     assert len(df) == 2
@@ -141,86 +256,102 @@ async def test_scrape_league_results_basic():
 async def test_scrape_league_results_empty():
     """No games found returns empty DataFrame."""
     page = _make_mock_page(evaluate_return=[])
-    df = await scrape_league_results(page, "https://example.com", "Test", load_more_clicks=0)
+    df = await scrape_league_results(page, "https://example.com", "Test", max_clicks=0)
+    assert df.empty
+
+
+@pytest.mark.asyncio
+async def test_scrape_league_results_404():
+    """404 response returns empty DataFrame."""
+    page = _make_mock_page()
+    mock_response = AsyncMock()
+    mock_response.status = 404
+    page.goto = AsyncMock(return_value=mock_response)
+
+    df = await scrape_league_results(page, "https://example.com/bad", "Bad", max_clicks=0)
     assert df.empty
 
 
 @pytest.mark.asyncio
 async def test_scrape_multiple_leagues_combines():
     """Multiple leagues are combined into one DataFrame."""
-    fake_game = [{
-        "game_id": "g1",
-        "date_str": "01.03.2026",
-        "home_team": "A",
-        "away_team": "B",
-        "home_score": 100,
-        "away_score": 90,
-    }]
+    # Use unique game_ids per league so dedup doesn't collapse them
+    call_count = 0
+
+    def make_page_for_league():
+        nonlocal call_count
+        call_count += 1
+        return _make_mock_page(evaluate_return=[{
+            "game_id": f"g{call_count}",
+            "date_str": "01.03.2026",
+            "home_team": "A",
+            "away_team": "B",
+            "home_score": 100,
+            "away_score": 90,
+        }])
 
     with patch("src.data.flashscore_scraper.async_playwright") as mock_pw:
         mock_browser = AsyncMock()
-        mock_page = _make_mock_page(evaluate_return=fake_game)
-        mock_browser.new_page = AsyncMock(return_value=mock_page)
         mock_context = AsyncMock()
-        mock_context.chromium.launch = AsyncMock(return_value=mock_browser)
-        mock_pw.return_value.__aenter__ = AsyncMock(return_value=mock_context)
+        mock_context.new_page = AsyncMock(side_effect=make_page_for_league)
+        mock_context.close = AsyncMock()
+        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        mock_browser.close = AsyncMock()
+
+        mock_pw_instance = AsyncMock()
+        mock_pw_instance.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_pw.return_value.__aenter__ = AsyncMock(return_value=mock_pw_instance)
         mock_pw.return_value.__aexit__ = AsyncMock(return_value=False)
 
         urls = {"League A": "https://a.com", "League B": "https://b.com"}
-        df = await scrape_multiple_leagues(urls, headless=True, load_more_clicks=0)
+        df = await scrape_multiple_leagues(urls, headless=True, max_clicks=0)
 
-    # Both leagues return the same fake game, so 2 rows total
     assert len(df) == 2
     assert set(df["league"]) == {"League A", "League B"}
 
 
 @pytest.mark.asyncio
 async def test_scrape_multiple_leagues_handles_error():
-    """A failing league is skipped, others still scraped."""
-    call_count = 0
-
-    async def side_effect(*args, **kwargs):
-        nonlocal call_count
-        call_count += 1
-        # Second league call: goto raises
-        if call_count > 2:  # first goto + wait_for_timeout, then second goto
-            raise Exception("Network error")
-        return []
-
+    """A failing league is skipped after retries, others still scraped."""
     with patch("src.data.flashscore_scraper.async_playwright") as mock_pw:
         mock_browser = AsyncMock()
-        mock_page = AsyncMock()
-        mock_page.goto = AsyncMock()
-        mock_page.wait_for_timeout = AsyncMock()
-        mock_page.evaluate = AsyncMock(return_value=[{
-            "game_id": "g1", "date_str": "01.03.2026",
-            "home_team": "A", "away_team": "B",
-            "home_score": 80, "away_score": 70,
-        }])
-        mock_btn = AsyncMock()
-        mock_btn.is_visible = AsyncMock(return_value=False)
-        mock_page.locator = MagicMock(return_value=mock_btn)
-        mock_browser.new_page = AsyncMock(return_value=mock_page)
-
         mock_context = AsyncMock()
-        mock_context.chromium.launch = AsyncMock(return_value=mock_browser)
-        mock_pw.return_value.__aenter__ = AsyncMock(return_value=mock_context)
+
+        call_count = 0
+
+        async def new_page_side_effect():
+            nonlocal call_count
+            call_count += 1
+            return _make_mock_page(evaluate_return=[{
+                "game_id": "g1", "date_str": "01.03.2026",
+                "home_team": "A", "away_team": "B",
+                "home_score": 80, "away_score": 70,
+            }])
+
+        mock_context.new_page = AsyncMock(side_effect=new_page_side_effect)
+        mock_context.close = AsyncMock()
+        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        mock_browser.close = AsyncMock()
+
+        mock_pw_instance = AsyncMock()
+        mock_pw_instance.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_pw.return_value.__aenter__ = AsyncMock(return_value=mock_pw_instance)
         mock_pw.return_value.__aexit__ = AsyncMock(return_value=False)
 
-        # Make second league fail
+        # Patch scrape_league_results to fail for one league
         original_scrape = scrape_league_results
 
-        async def patched_scrape(page, url, name, load_more_clicks=5):
+        async def patched_scrape(ctx, url, name, max_clicks=20):
             if name == "Fail League":
                 raise Exception("Scrape failed")
-            return await original_scrape(page, url, name, load_more_clicks)
+            return await original_scrape(ctx, url, name, max_clicks)
 
         with patch(
             "src.data.flashscore_scraper.scrape_league_results",
             side_effect=patched_scrape,
         ):
             urls = {"Good League": "https://good.com", "Fail League": "https://fail.com"}
-            df = await scrape_multiple_leagues(urls, headless=True, load_more_clicks=0)
+            df = await scrape_multiple_leagues(urls, headless=True, max_clicks=0)
 
     # Only the good league's games survive
     assert len(df) == 1
@@ -243,16 +374,22 @@ async def test_scrape_multiple_leagues_stores_to_datastore():
 
     with patch("src.data.flashscore_scraper.async_playwright") as mock_pw:
         mock_browser = AsyncMock()
-        mock_page = _make_mock_page(evaluate_return=fake_game)
-        mock_browser.new_page = AsyncMock(return_value=mock_page)
         mock_context = AsyncMock()
-        mock_context.chromium.launch = AsyncMock(return_value=mock_browser)
-        mock_pw.return_value.__aenter__ = AsyncMock(return_value=mock_context)
+        mock_context.new_page = AsyncMock(
+            side_effect=lambda: _make_mock_page(evaluate_return=fake_game)
+        )
+        mock_context.close = AsyncMock()
+        mock_browser.new_context = AsyncMock(return_value=mock_context)
+        mock_browser.close = AsyncMock()
+
+        mock_pw_instance = AsyncMock()
+        mock_pw_instance.chromium.launch = AsyncMock(return_value=mock_browser)
+        mock_pw.return_value.__aenter__ = AsyncMock(return_value=mock_pw_instance)
         mock_pw.return_value.__aexit__ = AsyncMock(return_value=False)
 
         await scrape_multiple_leagues(
             {"Test": "https://test.com"},
-            headless=True, load_more_clicks=0, store=mock_store,
+            headless=True, max_clicks=0, store=mock_store,
         )
 
     mock_store.upsert_games.assert_called_once()
@@ -260,7 +397,7 @@ async def test_scrape_multiple_leagues_stores_to_datastore():
     assert len(stored_df) == 1
 
 
-# ── SportsPlus scraper with mocked Playwright ────────────────────
+# -- SportsPlus scraper with mocked Playwright ---------------------------------
 
 
 @pytest.mark.asyncio
@@ -309,7 +446,7 @@ async def test_extract_margins_no_section():
 
 @pytest.mark.asyncio
 async def test_extract_margins_partial():
-    """Handles partial data — some buckets without valid odds."""
+    """Handles partial data -- some buckets without valid odds."""
     page_text = """
 Any Team Winning Margin (Incl. Overtime)
 1-5
@@ -400,7 +537,7 @@ async def test_get_game_links_fallback_date():
     assert games[0]["game_date"] == datetime.now().strftime("%Y-%m-%d")
 
 
-# ── Live integration tests ───────────────────────────────────────
+# -- Live integration tests ----------------------------------------------------
 # These hit real sites to verify our CSS selectors still work.
 # Run with: pytest tests/test_scrapers.py -m live -v
 
@@ -417,15 +554,16 @@ async def test_live_flashscore_euroleague():
     """Verify Flashscore Euroleague selectors return valid game data."""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+        context = await browser.new_context()
 
         df = await scrape_league_results(
-            page, EUROLEAGUE_URL, "Euroleague", load_more_clicks=0,
+            context, EUROLEAGUE_URL, "Euroleague", max_clicks=0,
         )
 
+        await context.close()
         await browser.close()
 
-    assert not df.empty, "Euroleague returned 0 games — DOM selectors may be broken"
+    assert not df.empty, "Euroleague returned 0 games -- DOM selectors may be broken"
     assert len(df) >= 10, f"Expected 10+ games, got {len(df)}"
 
     # Verify DataFrame schema
@@ -442,7 +580,7 @@ async def test_live_flashscore_euroleague():
     assert (df["away_score"] > 0).all(), "Invalid away scores"
 
     # Verify dates are parsed (not all the same fallback date)
-    assert df["date"].nunique() > 1, "All dates identical — date parsing broken"
+    assert df["date"].nunique() > 1, "All dates identical -- date parsing broken"
 
     # Verify dates are reasonable (not in the future, not ancient)
     dates = pd.to_datetime(df["date"])
@@ -460,22 +598,21 @@ async def test_live_flashscore_nba():
     """Verify Flashscore NBA selectors work (different region/structure)."""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+        context = await browser.new_context()
 
         df = await scrape_league_results(
-            page, NBA_URL, "NBA", load_more_clicks=0,
+            context, NBA_URL, "NBA", max_clicks=0,
         )
 
+        await context.close()
         await browser.close()
 
-    assert not df.empty, "NBA returned 0 games — DOM selectors may be broken"
+    assert not df.empty, "NBA returned 0 games -- DOM selectors may be broken"
     assert len(df) >= 10
-    assert df["date"].nunique() > 1, "All dates identical — date parsing broken"
-    # Most NBA scores should be 70+, but allow some outliers
-    # (postponed games, quarter scores, etc.)
+    assert df["date"].nunique() > 1, "All dates identical -- date parsing broken"
     normal_scores = df["home_score"] >= 70
     assert normal_scores.mean() > 0.9, (
-        f"Only {normal_scores.mean():.0%} of NBA scores >= 70 — "
+        f"Only {normal_scores.mean():.0%} of NBA scores >= 70 -- "
         "score parsing may be broken"
     )
     assert df["game_id"].is_unique
@@ -487,12 +624,13 @@ async def test_live_flashscore_spain_acb():
     """Verify a European national league works."""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+        context = await browser.new_context()
 
         df = await scrape_league_results(
-            page, ACB_URL, "Spain ACB", load_more_clicks=0,
+            context, ACB_URL, "Spain ACB", max_clicks=0,
         )
 
+        await context.close()
         await browser.close()
 
     assert not df.empty, "Spain ACB returned 0 games"
@@ -506,12 +644,13 @@ async def test_live_flashscore_404_handling():
     """Verify 404 pages return empty DataFrame, not crash."""
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
-        page = await browser.new_page()
+        context = await browser.new_context()
 
         df = await scrape_league_results(
-            page, DEAD_URL, "Bad URL", load_more_clicks=0,
+            context, DEAD_URL, "Bad URL", max_clicks=0,
         )
 
+        await context.close()
         await browser.close()
 
     assert df.empty, "404 page should return empty DataFrame"
@@ -522,15 +661,20 @@ async def test_live_flashscore_404_handling():
 async def test_live_flashscore_dom_selectors():
     """Directly verify that critical CSS selectors exist on the page.
 
-    This is the canary test — if Flashscore renames their CSS classes,
+    This is the canary test -- if Flashscore renames their CSS classes,
     this test fails with a clear message about which selector broke.
     """
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
         page = await browser.new_page()
 
-        await page.goto(EUROLEAGUE_URL, wait_until="networkidle")
-        await page.wait_for_timeout(2000)
+        await page.goto(EUROLEAGUE_URL, wait_until="domcontentloaded")
+
+        # Wait for match content to load
+        try:
+            await page.wait_for_selector(".event__match", timeout=10000)
+        except Exception:
+            pass
 
         # Dismiss cookie banner if present
         try:
@@ -567,18 +711,17 @@ async def test_live_flashscore_load_more():
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=True)
 
-        # Use separate pages to avoid networkidle timeout on second nav
-        page1 = await browser.new_page()
+        ctx1 = await browser.new_context()
         df_short = await scrape_league_results(
-            page1, EUROLEAGUE_URL, "Euroleague", load_more_clicks=0,
+            ctx1, EUROLEAGUE_URL, "Euroleague", max_clicks=0,
         )
-        await page1.close()
+        await ctx1.close()
 
-        page2 = await browser.new_page()
+        ctx2 = await browser.new_context()
         df_long = await scrape_league_results(
-            page2, EUROLEAGUE_URL, "Euroleague", load_more_clicks=3,
+            ctx2, EUROLEAGUE_URL, "Euroleague", max_clicks=3,
         )
-        await page2.close()
+        await ctx2.close()
 
         await browser.close()
 
