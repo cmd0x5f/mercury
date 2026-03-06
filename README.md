@@ -68,8 +68,8 @@ source .venv/bin/activate
 # Step 1: Collect historical NBA data (~3,700 games, takes ~5 seconds)
 make collect
 
-# Step 1b (optional): Collect international league data from Flashscore
-make collect-leagues
+# Step 1b: Collect international league data from Flashscore (current + 2 past seasons)
+python -m src.app.cli collect-leagues --seasons 2 --parallel 3
 
 # Step 2: Train the model (NBA-only or all leagues)
 make train
@@ -102,6 +102,13 @@ Commands:
   picks            Show +EV picks with Kelly-sized stakes
   status           Show bet tracking P&L summary
 
+Options for collect-leagues:
+  -s, --seasons N       Scrape N past seasons in addition to current (default: 0)
+  -p, --parallel N      Scrape N leagues concurrently (default: 1)
+  --incremental/--full  Skip re-scraping games already in DB (default: full)
+  -c, --clicks N        Max "Show more" clicks per league (default: 20)
+  --headless/--no-headless  Run browser headless (default: headless)
+
 Options for train/evaluate:
   -l, --league    Train/evaluate on single league (default: all)
 
@@ -120,7 +127,7 @@ sportsbetting/
 │   ├── data/
 │   │   ├── data_store.py           # SQLite storage for games, odds, bets
 │   │   ├── nba_collector.py        # NBA stats API data collection
-│   │   ├── flashscore_scraper.py   # Playwright scraper for international league results
+│   │   ├── flashscore_scraper.py   # Playwright scraper: retries, concurrency, historical seasons
 │   │   ├── sportsplus_scraper.py   # Playwright scraper for bookmaker odds
 │   │   ├── league_matcher.py       # Fuzzy league + team name matching (rapidfuzz)
 │   │   └── team_names.py           # NBA team name mapping
@@ -142,7 +149,7 @@ sportsbetting/
 ├── config/
 │   ├── settings.yaml               # Model + betting configuration
 │   └── league_mappings.yaml        # 30+ league → Flashscore URL mappings
-├── tests/                          # 107 unit tests + 6 live integration tests
+├── tests/                          # 120 unit tests + 6 live integration tests
 ├── data/                           # SQLite DB + saved models (gitignored)
 ├── notebooks/                      # Exploration notebooks
 ├── pyproject.toml
@@ -190,20 +197,20 @@ The model is not trying to predict exact margins — it's trying to produce **we
 | Source | Coverage | Cost |
 |--------|----------|------|
 | [nba_api](https://github.com/swar/nba_api) | NBA (20+ years of game logs) | Free |
-| [Flashscore](https://flashscore.com) (Playwright scraper) | 30+ international basketball leagues | Free |
+| [Flashscore](https://flashscore.com) (Playwright scraper) | 30 international leagues, ~22k games (3 seasons) | Free |
 | SportsPlus.ph (Playwright scraper) | Winning margin odds for upcoming games | Free |
 | [API-Basketball](https://rapidapi.com/api-sports/api/api-basketball) (future) | 115+ leagues via REST API | $7.99/mo |
 
 ## Testing
 
 ```bash
-make test           # 107 unit tests, ~5 seconds
+make test           # 120 unit tests, ~11 seconds
 make test-live      # 6 live integration tests (hits Flashscore, ~60s)
 make test-cov       # with coverage report
 make lint           # ruff linting
 ```
 
-Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invariants, Kelly boundary conditions, margin-to-bucket mapping, model train/predict/save/load, team name mapping, scraper date parsing, bucket regex, and **live DOM selector validation** against Flashscore (catches site structure changes).
+Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invariants, Kelly boundary conditions, margin-to-bucket mapping, model train/predict/save/load, team name mapping, scraper date parsing, retry logic, season discovery, bucket regex, and **live DOM selector validation** against Flashscore (catches site structure changes).
 
 ## Roadmap
 
@@ -212,6 +219,11 @@ Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invar
 - [x] League + team name fuzzy matching between SportsPlus ↔ Flashscore via `rapidfuzz`
 - [x] `league_id` as categorical feature with per-league σ estimation
 - [x] Live integration tests to detect Flashscore DOM changes
+- [x] Historical season scraping via archive page discovery (`--seasons N`)
+- [x] Concurrent league scraping with configurable parallelism (`--parallel N`)
+- [x] Incremental mode — only inserts new games (`--incremental`)
+- [x] Retry with exponential backoff, smart "load more" with empty-cycle detection
+- [x] `domcontentloaded` waits instead of `networkidle` (eliminates ad/tracker timeouts)
 - [ ] SofaScore fallback when Flashscore scraping fails
 
 ### Phase 3: Backtesting & Calibration
