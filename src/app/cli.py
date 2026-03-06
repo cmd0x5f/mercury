@@ -39,28 +39,61 @@ def collect(seasons):
     click.echo(f"Collected {len(df)} games across {len(seasons)} seasons")
 
 
-@main.command()
-def train():
-    """Train the margin prediction model."""
-    store = DataStore()
-    games = store.get_games(league="NBA")
+@main.command("collect-leagues")
+@click.option("--headless/--no-headless", default=True)
+@click.option("--clicks", "-c", default=5, help="'Show more' clicks per league")
+def collect_leagues(headless, clicks):
+    """Scrape historical results from Flashscore for all mapped leagues."""
+    from src.data.flashscore_scraper import scrape_leagues_sync
+    from src.data.league_matcher import LeagueMatcher
 
-    if games.empty:
-        click.echo("No games in database. Run 'collect' first.")
+    store = DataStore()
+    matcher = LeagueMatcher()
+    urls = matcher.get_all_flashscore_urls()
+
+    if not urls:
+        click.echo("No Flashscore URLs configured in league_mappings.yaml")
         sys.exit(1)
 
-    click.echo(f"Training on {len(games)} NBA games...")
+    click.echo(f"Scraping {len(urls)} leagues from Flashscore...")
+    df = scrape_leagues_sync(urls, headless=headless, load_more_clicks=clicks, store=store)
+
+    if df.empty:
+        click.echo("No games scraped")
+    else:
+        leagues = df["league"].nunique()
+        click.echo(f"Collected {len(df)} games across {leagues} leagues")
+
+
+@main.command()
+@click.option("--league", "-l", default=None, help="Train on single league (default: all)")
+def train(league):
+    """Train the margin prediction model."""
+    store = DataStore()
+    games = store.get_games(league=league)
+
+    if games.empty:
+        click.echo("No games in database. Run 'collect' or 'collect-leagues' first.")
+        sys.exit(1)
+
+    leagues = games["league"].nunique()
+    click.echo(f"Training on {len(games)} games across {leagues} league(s)...")
     model = MarginModel()
     model.train(games)
     model.save()
-    click.echo(f"Model trained (sigma={model.sigma:.2f}) and saved")
+    click.echo(f"Model trained (global σ={model.sigma:.2f}) and saved")
+    if model.league_sigmas:
+        inv = {v: k for k, v in model.league_categories.items()}
+        for lid, s in model.league_sigmas.items():
+            click.echo(f"  {inv.get(lid, lid)}: σ={s:.2f}")
 
 
 @main.command()
-def evaluate():
+@click.option("--league", "-l", default=None, help="Evaluate single league (default: all)")
+def evaluate(league):
     """Run walk-forward evaluation on historical data."""
     store = DataStore()
-    games = store.get_games(league="NBA")
+    games = store.get_games(league=league)
 
     if games.empty:
         click.echo("No games in database. Run 'collect' first.")
@@ -91,7 +124,9 @@ def scrape(headless):
         return
 
     store.upsert_odds(df)
-    click.echo(f"Scraped {len(df)} odds for {df['home_team'].nunique()} games")
+    leagues = df["league"].nunique()
+    games_count = df["home_team"].nunique()
+    click.echo(f"Scraped {len(df)} odds for {games_count} games across {leagues} leagues")
 
 
 @main.command()
@@ -101,6 +136,8 @@ def scrape(headless):
 @click.option("--date", "-d", default=None, help="Game date YYYY-MM-DD (default: latest)")
 def picks(bankroll, min_edge, kelly, date):
     """Show +EV picks by comparing model vs book odds."""
+    from src.data.league_matcher import LeagueMatcher, TeamMatcher
+
     store = DataStore()
     model = MarginModel()
 
@@ -125,51 +162,77 @@ def picks(bankroll, min_edge, kelly, date):
         click.echo(f"No odds for {date}. Run 'scrape' first.")
         sys.exit(1)
 
-    # Get all historical games for feature computation
-    games = store.get_games(league="NBA")
-    featured = build_features(games)
+    # Set up league/team matching for international games
+    league_matcher = LeagueMatcher()
+    team_matcher = TeamMatcher()
+
+    # Get all historical games and build features
+    all_games = store.get_games()
+    if all_games.empty:
+        click.echo("No games in database. Run 'collect' or 'collect-leagues' first.")
+        sys.exit(1)
+
+    featured = build_features(all_games)
+
+    # Register known teams per league from historical data
+    for lg, group in all_games.groupby("league"):
+        teams = list(set(group["home_team"].tolist() + group["away_team"].tolist()))
+        team_matcher.register_teams(lg, teams)
 
     # For each game with odds, predict bucket probs
     all_bets = []
-    game_groups = odds_df.groupby(["home_team", "away_team"])
+    game_groups = odds_df.groupby(["home_team", "away_team", "league"])
 
-    for (home, away), group in game_groups:
-        # Map SportsPlus names to nba_api abbreviations
-        home_abbr = normalize_team(home)
-        away_abbr = normalize_team(away)
+    for (home, away, sp_league), group in game_groups:
+        # Match league from SportsPlus to our canonical name
+        canonical_league = league_matcher.match_league(sp_league)
 
-        if not home_abbr or not away_abbr:
-            logger.debug(f"Non-NBA game: {home} vs {away}, skipping")
+        # NBA uses nba_api abbreviations — map via team_names
+        if canonical_league == "NBA" or (not canonical_league and normalize_team(home)):
+            canonical_league = "NBA"
+            home_mapped = normalize_team(home)
+            away_mapped = normalize_team(away)
+        elif canonical_league:
+            # International: fuzzy match team names to Flashscore data
+            home_mapped, away_mapped = team_matcher.match_game(home, away, canonical_league)
+        else:
+            logger.debug(f"Unknown league '{sp_league}' for {home} vs {away}, skipping")
             continue
+
+        if not home_mapped or not away_mapped:
+            logger.debug(f"Can't map teams: {home} vs {away} ({canonical_league})")
+            continue
+
+        # Look up league_id from model
+        league_id = model.get_league_id(canonical_league)
 
         # Find latest features for each team
         home_games = featured[
-            (featured["home_team"] == home_abbr) | (featured["away_team"] == home_abbr)
+            (featured["home_team"] == home_mapped) | (featured["away_team"] == home_mapped)
         ]
         away_games = featured[
-            (featured["home_team"] == away_abbr) | (featured["away_team"] == away_abbr)
+            (featured["home_team"] == away_mapped) | (featured["away_team"] == away_mapped)
         ]
 
         if home_games.empty or away_games.empty:
-            logger.warning(f"No history for {home} ({home_abbr}) vs {away} ({away_abbr})")
+            logger.warning(f"No history for {home} ({home_mapped}) vs {away} ({away_mapped})")
             continue
 
         # Get the team's latest Elo/stats regardless of home/away in that game
         lh = home_games.iloc[-1]
         la = away_games.iloc[-1]
 
-        # Extract the correct Elo for the team (might have been home or away)
-        h_elo = lh["home_elo"] if lh["home_team"] == home_abbr else lh["away_elo"]
-        a_elo = la["away_elo"] if la["away_team"] == away_abbr else la["home_elo"]
+        h_elo = lh["home_elo"] if lh["home_team"] == home_mapped else lh["away_elo"]
+        a_elo = la["away_elo"] if la["away_team"] == away_mapped else la["home_elo"]
 
-        h_avg_m = lh["home_avg_margin"] if lh["home_team"] == home_abbr else lh["away_avg_margin"]
-        a_avg_m = la["away_avg_margin"] if la["away_team"] == away_abbr else la["home_avg_margin"]
+        h_avg_m = lh["home_avg_margin"] if lh["home_team"] == home_mapped else lh["away_avg_margin"]
+        a_avg_m = la["away_avg_margin"] if la["away_team"] == away_mapped else la["home_avg_margin"]
 
-        h_avg_s = lh["home_avg_scored"] if lh["home_team"] == home_abbr else lh["away_avg_scored"]
-        a_avg_s = la["away_avg_scored"] if la["away_team"] == away_abbr else la["home_avg_scored"]
+        h_avg_s = lh["home_avg_scored"] if lh["home_team"] == home_mapped else lh["away_avg_scored"]
+        a_avg_s = la["away_avg_scored"] if la["away_team"] == away_mapped else la["home_avg_scored"]
 
-        h_gnum = lh["home_game_num"] if lh["home_team"] == home_abbr else lh["away_game_num"]
-        a_gnum = la["away_game_num"] if la["away_team"] == away_abbr else la["home_game_num"]
+        h_gnum = lh["home_game_num"] if lh["home_team"] == home_mapped else lh["away_game_num"]
+        a_gnum = la["away_game_num"] if la["away_team"] == away_mapped else la["home_game_num"]
 
         features = {
             "home_elo": h_elo,
@@ -185,14 +248,15 @@ def picks(bankroll, min_edge, kelly, date):
             "away_game_num": a_gnum,
             "is_b2b_home": 0,
             "is_b2b_away": 0,
+            "league_id": league_id,
         }
 
-        model_probs = model.predict_single(features)
+        model_probs = model.predict_single(features, league_id=league_id)
         book_odds = dict(zip(group["bucket"], group["decimal_odds"]))
 
         game_info = {
             "game_date": date,
-            "league": "NBA",
+            "league": canonical_league,
             "home_team": home,
             "away_team": away,
         }
@@ -208,28 +272,29 @@ def picks(bankroll, min_edge, kelly, date):
     sized_bets = calculate_stakes(all_bets, bankroll, fraction=kelly)
 
     # Display
-    click.echo(f"\n{'='*85}")
+    click.echo(f"\n{'='*90}")
     click.echo(f"  PICKS — {date}  |  Bankroll: ${bankroll:,.0f}  |  Min Edge: {min_edge:.0%}")
-    click.echo(f"{'='*85}")
+    click.echo(f"{'='*90}")
     click.echo(
-        f"{'Game':<35} {'Bucket':>6} {'Model%':>7} {'Book%':>7} "
+        f"{'Game':<30} {'League':>10} {'Bucket':>6} {'Model%':>7} {'Book%':>7} "
         f"{'Edge':>6} {'EV/unit':>7} {'Stake':>8}"
     )
-    click.echo("-" * 85)
+    click.echo("-" * 90)
 
     for bet, stake in sized_bets:
         game = f"{bet.home_team} vs {bet.away_team}"
-        if len(game) > 34:
-            game = game[:31] + "..."
+        if len(game) > 29:
+            game = game[:26] + "..."
+        league_short = bet.league[:10] if bet.league else "?"
         click.echo(
-            f"{game:<35} {bet.bucket:>6} {bet.model_prob:>6.1%} "
+            f"{game:<30} {league_short:>10} {bet.bucket:>6} {bet.model_prob:>6.1%} "
             f"{bet.implied_prob:>6.1%} {bet.edge:>+5.1%} "
             f"{bet.ev_per_unit:>+6.2f} ${stake:>7.0f}"
         )
 
     total_stake = sum(s for _, s in sized_bets)
-    click.echo("-" * 85)
-    click.echo(f"{'Total exposure:':<55} ${total_stake:>7.0f} ({total_stake/bankroll:.1%})")
+    click.echo("-" * 90)
+    click.echo(f"{'Total exposure:':<60} ${total_stake:>7.0f} ({total_stake/bankroll:.1%})")
     click.echo()
 
 

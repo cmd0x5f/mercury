@@ -21,6 +21,7 @@ FEATURE_COLS = [
     "away_game_num",
     "is_b2b_home",
     "is_b2b_away",
+    "league_id",
 ]
 
 TARGET_COL = "margin"  # home_score - away_score (signed)
@@ -30,6 +31,7 @@ def build_features(games: pd.DataFrame, elo_k: int = 20) -> pd.DataFrame:
     """Build all features from raw game data.
 
     Input must have: date, home_team, away_team, home_score, away_score
+    Optionally: league (defaults to 'NBA')
     Returns DataFrame with all feature columns + target.
     """
     games = games.sort_values("date").reset_index(drop=True)
@@ -38,12 +40,31 @@ def build_features(games: pd.DataFrame, elo_k: int = 20) -> pd.DataFrame:
     if "margin" not in games.columns:
         games["margin"] = games["home_score"] - games["away_score"]
 
-    # Chain feature computations
-    games = compute_elo_ratings(games, k=elo_k)
-    games = compute_rolling_margins(games)
-    games = compute_context_features(games)
+    # Ensure league column exists
+    if "league" not in games.columns:
+        games["league"] = "NBA"
 
-    return games
+    # Encode league as integer ID
+    league_cats = pd.Categorical(games["league"])
+    games["league_id"] = league_cats.codes
+
+    # Compute features per league (Elo ratings are league-specific)
+    parts = []
+    for league, group in games.groupby("league"):
+        group = group.copy()
+        group = compute_elo_ratings(group, k=elo_k)
+        group = compute_rolling_margins(group)
+        group = compute_context_features(group)
+        parts.append(group)
+
+    result = pd.concat(parts).sort_values("date").reset_index(drop=True)
+
+    # Store the league category mapping for later use
+    result.attrs["league_categories"] = dict(
+        zip(league_cats.categories, range(len(league_cats.categories)))
+    )
+
+    return result
 
 
 def get_feature_matrix(games: pd.DataFrame) -> tuple[pd.DataFrame, pd.Series]:

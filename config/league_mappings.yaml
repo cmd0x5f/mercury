@@ -1,0 +1,105 @@
+# SportsPlus league name → Flashscore results URL
+# Run: python -m src.app.cli collect-leagues to scrape all mapped leagues
+
+leagues:
+  # North America
+  NBA:
+    flashscore: "https://www.flashscore.com/basketball/usa/nba/results/"
+    source: nba_api  # use nba_api instead of flashscore
+  NCAA:
+    flashscore: "https://www.flashscore.com/basketball/usa/ncaa/results/"
+
+  # Europe - Top Leagues
+  Euroleague:
+    flashscore: "https://www.flashscore.com/basketball/europe/euroleague/results/"
+    aliases: ["EuroLeague"]
+  ABA Liga:
+    flashscore: "https://www.flashscore.com/basketball/europe/aba-league/results/"
+    aliases: ["ABA League", "ABA Liga 2"]
+  VTB United League:
+    flashscore: "https://www.flashscore.com/basketball/russia/vtb-united-league/results/"
+    aliases: ["VTB"]
+
+  # Europe - National
+  Spain ACB:
+    flashscore: "https://www.flashscore.com/basketball/spain/acb/results/"
+    aliases: ["Liga Endesa", "ACB"]
+  Turkish Super Lig:
+    flashscore: "https://www.flashscore.com/basketball/turkey/super-lig/results/"
+    aliases: ["BSL", "Turkey Super Lig", "Turkish BSL"]
+  French LNB:
+    flashscore: "https://www.flashscore.com/basketball/france/lnb/results/"
+    aliases: ["Betclic Elite", "LNB Pro A", "Pro A"]
+  German BBL:
+    flashscore: "https://www.flashscore.com/basketball/germany/bbl/results/"
+    aliases: ["BBL"]
+  Italian Lega A:
+    flashscore: "https://www.flashscore.com/basketball/italy/lega-a/results/"
+    aliases: ["Serie A", "Lega Basket", "Lega A"]
+  Greek Basket League:
+    flashscore: "https://www.flashscore.com/basketball/greece/basket-league/results/"
+    aliases: ["A1"]
+  Polish Basket Liga:
+    flashscore: "https://www.flashscore.com/basketball/poland/basket-liga/results/"
+    aliases: ["PLK", "Energa Basket Liga"]
+  Czech NBL:
+    flashscore: "https://www.flashscore.com/basketball/czech-republic/nbl/results/"
+    aliases: ["NBL", "Czech NBL"]
+  Lithuanian LKL:
+    flashscore: "https://www.flashscore.com/basketball/lithuania/lkl/results/"
+    aliases: ["LKL"]
+  Hungarian NB I:
+    flashscore: "https://www.flashscore.com/basketball/hungary/nb-i-a/results/"
+    aliases: ["NB I/A"]
+  Romanian Divizia A:
+    flashscore: "https://www.flashscore.com/basketball/romania/divizia-a/results/"
+    aliases: ["Liga Nationala", "Divizia A"]
+  Slovak Extraliga:
+    flashscore: "https://www.flashscore.com/basketball/slovakia/extraliga/results/"
+    aliases: ["Extraliga"]
+  Serbian Superleague:
+    flashscore: "https://www.flashscore.com/basketball/serbia/superleague/results/"
+    aliases: ["KLS", "Super League"]
+  Danish Basketligaen:
+    flashscore: "https://www.flashscore.com/basketball/denmark/basketligaen/results/"
+    aliases: ["Basketligaen"]
+  Finnish Korisliiga:
+    flashscore: "https://www.flashscore.com/basketball/finland/korisliiga/results/"
+    aliases: ["Korisliiga"]
+  Norwegian BLNO:
+    flashscore: "https://www.flashscore.com/basketball/norway/blno/results/"
+    aliases: ["BLNO"]
+  Swedish Basketligan:
+    flashscore: "https://www.flashscore.com/basketball/sweden/basketligan/results/"
+    aliases: ["Basketligan"]
+  Kosovo Superliga:
+    flashscore: "https://www.flashscore.com/basketball/kosovo/superliga/results/"
+    aliases: ["Superliga Kosovo"]
+  Georgian Superleague:
+    flashscore: "https://www.flashscore.com/basketball/georgia/superleague/results/"
+    aliases: ["Georgia Superliga"]
+
+  # South America
+  Argentina Liga A:
+    flashscore: "https://www.flashscore.com/basketball/argentina/liga-a/results/"
+    aliases: ["Liga A", "LNB", "Liga Nacional"]
+  Brazil NBB:
+    flashscore: "https://www.flashscore.com/basketball/brazil/nbb/results/"
+    aliases: ["NBB"]
+
+  # Asia
+  China CBA:
+    flashscore: "https://www.flashscore.com/basketball/china/cba/results/"
+    aliases: ["CBA"]
+  Japan B.League:
+    flashscore: "https://www.flashscore.com/basketball/japan/b-league/results/"
+    aliases: ["B.League", "B League"]
+  Korean KBL:
+    flashscore: "https://www.flashscore.com/basketball/south-korea/kbl/results/"
+    aliases: ["KBL"]
+  Indonesian IBL:
+    flashscore: "https://www.flashscore.com/basketball/indonesia/ibl/results/"
+    aliases: ["IBL"]
+  Taiwan P.League:
+    flashscore: "https://www.flashscore.com/basketball/taiwan/p-league/results/"
+    aliases: ["P.LEAGUE+", "P. League"]

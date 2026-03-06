@@ -28,32 +28,71 @@ async def _dismiss_terms_dialog(page: Page):
 async def get_game_links(page: Page) -> list[dict]:
     """Get all basketball game links from the upcoming page.
 
-    Returns list of {url, home_team, away_team, league, game_date}
+    Returns list of {url, home_team, away_team, league, game_date}.
+    League is detected from section headers on the page.
     """
     await page.goto(BASKETBALL_URL, wait_until="networkidle")
     await page.wait_for_timeout(2000)
     await _dismiss_terms_dialog(page)
 
+    # Use JS to walk the DOM and extract league headers + game links in order.
+    # League headers are text nodes (not inside <a>) that appear between game groups.
+    raw = await page.evaluate("""() => {
+        const results = [];
+        // The main content area contains league headers and game link blocks
+        const container = document.querySelector('.events-container')
+            || document.querySelector('.event-list')
+            || document.querySelector('main')
+            || document.body;
+
+        let currentLeague = 'Unknown';
+
+        // Walk through all elements in order
+        const walker = document.createTreeWalker(
+            container, NodeFilter.SHOW_ELEMENT, null
+        );
+        const seen = new Set();
+        let node;
+        while (node = walker.nextNode()) {
+            // League header: standalone text not inside a game link
+            if (!node.closest('a[href*="/sbk/m/"]') && !node.querySelector('a')) {
+                const text = node.textContent.trim();
+                // League names are short, no digits-heavy, no odds patterns
+                if (text && text.length > 1 && text.length < 80
+                    && !text.match(/^[\\d.+-]+$/)
+                    && !text.match(/^\\d{2}\\/\\d{2}/)
+                    && !text.match(/^(Next|Tournament|Outright|Sign|HDP|Main|Player)/)
+                    && !text.match(/^Basketball/)
+                    && node.children.length === 0
+                    && node.tagName !== 'A') {
+                    // Looks like a league name
+                    currentLeague = text.replace(/\\s+/g, ' ').trim();
+                }
+            }
+
+            // Game link
+            if (node.tagName === 'A' && node.href && node.href.includes('/sbk/m/')) {
+                if (seen.has(node.href)) continue;
+                seen.add(node.href);
+                const lines = node.innerText.split('\\n')
+                    .map(s => s.trim()).filter(s => s);
+                if (lines.length >= 3) {
+                    results.push({
+                        url: node.href,
+                        home_team: lines[0],
+                        away_team: lines[1],
+                        date_str: lines[2],
+                        league: currentLeague,
+                    });
+                }
+            }
+        }
+        return results;
+    }""")
+
     games = []
-
-    # Get all game links
-    game_links = await page.query_selector_all("a[href*='/sbk/m/']")
-
-    for link in game_links:
-        href = await link.get_attribute("href")
-        text = await link.inner_text()
-        lines = [s.strip() for s in text.strip().split("\n") if s.strip()]
-
-        if len(lines) < 3:
-            continue
-
-        # First two non-empty lines are team names, third has date/time
-        home_team = lines[0]
-        away_team = lines[1]
-        date_str = lines[2]
-
-        # Parse date like "03/05 (Thu) 08:00"
-        date_match = re.search(r"(\d{2}/\d{2})", date_str)
+    for item in raw:
+        date_match = re.search(r"(\d{2}/\d{2})", item["date_str"])
         if date_match:
             md = date_match.group(1)
             year = datetime.now().year
@@ -61,16 +100,16 @@ async def get_game_links(page: Page) -> list[dict]:
         else:
             game_date = datetime.now().strftime("%Y-%m-%d")
 
-        url = href if href.startswith("http") else BASE_URL + href
-
         games.append({
-            "url": url,
-            "home_team": home_team,
-            "away_team": away_team,
+            "url": item["url"],
+            "home_team": item["home_team"],
+            "away_team": item["away_team"],
             "game_date": game_date,
+            "league": item.get("league", "Unknown"),
         })
 
-    logger.info(f"Found {len(games)} basketball games")
+    leagues = set(g["league"] for g in games)
+    logger.info(f"Found {len(games)} games across {len(leagues)} leagues: {leagues}")
     return games
 
 
@@ -86,8 +125,6 @@ async def scrape_margin_odds(page: Page, game: dict) -> list[dict]:
     await _dismiss_terms_dialog(page)
 
     # Expand the "Any Team Winning Margin" section via JS click
-    # (Playwright's normal click fails because the element is far down
-    # the page and scrollIntoView doesn't work with the nested scroll container)
     expanded = await page.evaluate("""() => {
         const el = [...document.querySelectorAll('p.market-title-content')]
             .find(e => e.textContent.includes('Any Team Winning Margin'));
@@ -100,7 +137,10 @@ async def scrape_margin_odds(page: Page, game: dict) -> list[dict]:
     }""")
 
     if not expanded:
-        logger.warning(f"Margin section not found for {game['home_team']} vs {game['away_team']}")
+        logger.warning(
+            f"Margin section not found for "
+            f"{game['home_team']} vs {game['away_team']}"
+        )
         return []
 
     await page.wait_for_timeout(1500)
@@ -108,14 +148,15 @@ async def scrape_margin_odds(page: Page, game: dict) -> list[dict]:
     odds = await _extract_margins_from_text(page)
 
     logger.info(
-        f"  {game['home_team']} vs {game['away_team']}: "
+        f"  [{game.get('league', '?')}] "
+        f"{game['home_team']} vs {game['away_team']}: "
         f"{len(odds)} margin buckets found"
     )
     return odds
 
 
 async def _extract_margins_from_text(page: Page) -> list[dict]:
-    """Fallback: extract margin odds by parsing visible text after section expand."""
+    """Extract margin odds by parsing visible text after section expand."""
     all_text = await page.inner_text("body")
     lines = [s.strip() for s in all_text.split("\n") if s.strip()]
 
@@ -128,7 +169,7 @@ async def _extract_margins_from_text(page: Page) -> list[dict]:
             continue
 
         if in_section:
-            # Stop at next section header (contains parentheses and multiple words)
+            # Stop at next section header
             if "(" in line and ")" in line and not BUCKET_PATTERN.match(line):
                 break
 
@@ -144,7 +185,10 @@ async def _extract_margins_from_text(page: Page) -> list[dict]:
                     try:
                         odds_val = float(lines[j])
                         if 1.0 < odds_val < 100.0:
-                            odds.append({"bucket": bucket, "decimal_odds": odds_val})
+                            odds.append({
+                                "bucket": bucket,
+                                "decimal_odds": odds_val,
+                            })
                             break
                     except ValueError:
                         continue
@@ -156,7 +200,8 @@ async def scrape_all_margins(headless: bool = True) -> pd.DataFrame:
     """Scrape margin odds for all upcoming basketball games.
 
     Returns DataFrame with columns:
-        scraped_at, source, league, game_date, home_team, away_team, bucket, decimal_odds
+        scraped_at, source, league, game_date,
+        home_team, away_team, bucket, decimal_odds
     """
     async with async_playwright() as p:
         browser = await p.chromium.launch(headless=headless)
@@ -172,7 +217,7 @@ async def scrape_all_margins(headless: bool = True) -> pd.DataFrame:
                     all_odds.append({
                         "scraped_at": datetime.now().isoformat(),
                         "source": "sportsplus",
-                        "league": "NBA",  # TODO: detect league from page
+                        "league": game.get("league", "Unknown"),
                         "game_date": game["game_date"],
                         "home_team": game["home_team"],
                         "away_team": game["away_team"],
@@ -183,7 +228,10 @@ async def scrape_all_margins(headless: bool = True) -> pd.DataFrame:
         await browser.close()
 
     df = pd.DataFrame(all_odds)
-    logger.info(f"Scraped {len(df)} total margin odds across {len(games)} games")
+    logger.info(
+        f"Scraped {len(df)} total margin odds "
+        f"across {len(games)} games"
+    )
     return df
 
 

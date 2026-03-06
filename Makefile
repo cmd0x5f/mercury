@@ -1,4 +1,4 @@
-.PHONY: setup install test lint collect train evaluate scrape picks clean help
+.PHONY: setup install test test-live lint collect collect-leagues train evaluate scrape picks clean help
 
 PYTHON = .venv/bin/python
 CLI = $(PYTHON) -m src.app.cli
@@ -19,6 +19,9 @@ install: ## Install deps only (assumes venv exists)
 test: ## Run test suite
 	$(PYTHON) -m pytest tests/
 
+test-live: ## Run live scraper tests (hits real sites, verifies DOM selectors)
+	$(PYTHON) -m pytest tests/test_scrapers.py -m live -v -o "addopts="
+
 test-cov: ## Run tests with coverage report
 	$(PYTHON) -m pytest tests/ --cov=src --cov-report=term-missing
 
@@ -31,7 +34,10 @@ lint-fix: ## Auto-fix lint issues
 collect: ## Fetch NBA game data (3 seasons)
 	$(CLI) -v collect
 
-train: ## Train the margin prediction model
+collect-leagues: ## Scrape international league results from Flashscore
+	$(CLI) -v collect-leagues --no-headless
+
+train: ## Train the margin prediction model (all leagues)
 	$(CLI) -v train
 
 evaluate: ## Run walk-forward backtesting
@@ -44,6 +50,8 @@ picks: ## Show today's +EV picks
 	$(CLI) picks
 
 pipeline: collect train scrape picks ## Run full pipeline: collect → train → scrape → picks
+
+pipeline-full: collect collect-leagues train scrape picks ## Full pipeline with international leagues
 
 clean: ## Remove generated data and caches
 	rm -rf .pytest_cache htmlcov .coverage
