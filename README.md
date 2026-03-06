@@ -27,8 +27,8 @@ NBA Game Data → Feature Engineering → XGBoost Prediction → Folded Normal D
 SportsPlus Odds → Implied Probabilities ──────────────────────────────────→ Edge Calculation → +EV Picks
 ```
 
-1. **Predict the signed margin** (e.g., "home team wins by 5") using an XGBoost model trained on 3+ NBA seasons
-2. **Convert to a probability distribution** over absolute margin using a [folded normal distribution](https://en.wikipedia.org/wiki/Folded_normal_distribution) — the key insight is that |N(μ, σ)| naturally models "any team wins by X"
+1. **Predict the signed margin** (e.g., "home team wins by 5") using an XGBoost model trained on NBA + 30 international leagues
+2. **Convert to a probability distribution** over absolute margin using a [folded normal distribution](https://en.wikipedia.org/wiki/Folded_normal_distribution) with per-league σ — the key insight is that |N(μ, σ)| naturally models "any team wins by X"
 3. **Scrape bookmaker odds** from SportsPlus.ph for the "Any Team Winning Margin" market
 4. **Find value** where model probability exceeds implied probability by a configurable threshold
 5. **Size bets** using 1/4 Kelly criterion with exposure caps
@@ -68,7 +68,10 @@ source .venv/bin/activate
 # Step 1: Collect historical NBA data (~3,700 games, takes ~5 seconds)
 make collect
 
-# Step 2: Train the model
+# Step 1b (optional): Collect international league data from Flashscore
+make collect-leagues
+
+# Step 2: Train the model (NBA-only or all leagues)
 make train
 
 # Step 3: Scrape today's odds from SportsPlus (~10 min for full slate)
@@ -81,7 +84,8 @@ make picks
 Or run everything at once:
 
 ```bash
-make pipeline
+make pipeline           # NBA only: collect → train → scrape → picks
+make pipeline-full      # All leagues: collect → collect-leagues → train → scrape → picks
 ```
 
 ### CLI Reference
@@ -90,12 +94,16 @@ make pipeline
 python -m src.app.cli --help
 
 Commands:
-  collect   Fetch NBA game data and store it
-  train     Train the margin prediction model
-  evaluate  Run walk-forward backtesting
-  scrape    Scrape winning margin odds from SportsPlus
-  picks     Show +EV picks with Kelly-sized stakes
-  status    Show bet tracking P&L summary
+  collect          Fetch NBA game data and store it
+  collect-leagues  Scrape international league results from Flashscore
+  train            Train the margin prediction model
+  evaluate         Run walk-forward backtesting
+  scrape           Scrape winning margin odds from SportsPlus
+  picks            Show +EV picks with Kelly-sized stakes
+  status           Show bet tracking P&L summary
+
+Options for train/evaluate:
+  -l, --league    Train/evaluate on single league (default: all)
 
 Options for picks:
   -b, --bankroll  Current bankroll (default: 10000)
@@ -112,15 +120,17 @@ sportsbetting/
 │   ├── data/
 │   │   ├── data_store.py           # SQLite storage for games, odds, bets
 │   │   ├── nba_collector.py        # NBA stats API data collection
+│   │   ├── flashscore_scraper.py   # Playwright scraper for international league results
 │   │   ├── sportsplus_scraper.py   # Playwright scraper for bookmaker odds
-│   │   └── team_names.py           # Team name mapping between sources
+│   │   ├── league_matcher.py       # Fuzzy league + team name matching (rapidfuzz)
+│   │   └── team_names.py           # NBA team name mapping
 │   ├── features/
-│   │   ├── team_strength.py        # Elo rating system
+│   │   ├── team_strength.py        # Elo rating system (per-league)
 │   │   ├── form.py                 # Rolling margin & scoring averages
 │   │   ├── context.py              # Rest days, back-to-backs, schedule position
-│   │   └── builder.py              # Combines all features into model input
+│   │   └── builder.py              # Combines all features + league_id encoding
 │   ├── model/
-│   │   ├── margin_model.py         # XGBoost regressor for signed margin
+│   │   ├── margin_model.py         # XGBoost regressor with per-league σ
 │   │   ├── distribution.py         # Folded normal → bucket probabilities
 │   │   └── calibration.py          # Platt scaling (Phase 3)
 │   ├── betting/
@@ -130,8 +140,9 @@ sportsbetting/
 │   └── app/
 │       └── cli.py                  # Click CLI entry point
 ├── config/
-│   └── settings.yaml               # Model + betting configuration
-├── tests/                          # 85+ unit tests
+│   ├── settings.yaml               # Model + betting configuration
+│   └── league_mappings.yaml        # 30+ league → Flashscore URL mappings
+├── tests/                          # 107 unit tests + 6 live integration tests
 ├── data/                           # SQLite DB + saved models (gitignored)
 ├── notebooks/                      # Exploration notebooks
 ├── pyproject.toml
@@ -144,12 +155,13 @@ sportsbetting/
 | Feature | Description |
 |---------|-------------|
 | `elo_diff` | Home Elo + home advantage (100) - Away Elo |
-| `home_elo` / `away_elo` | Elo ratings (K=20, start 1500) |
+| `home_elo` / `away_elo` | Elo ratings (K=20, start 1500, per-league) |
 | `home_avg_margin` / `away_avg_margin` | Rolling 10-game average absolute margin |
 | `home_avg_scored` / `away_avg_scored` | Rolling 10-game scoring average |
 | `home_rest_days` / `away_rest_days` | Days since last game |
 | `home_game_num` / `away_game_num` | Season game count (schedule fatigue) |
 | `is_b2b_home` / `is_b2b_away` | Back-to-back flag (rest ≤ 1 day) |
+| `league_id` | Categorical league identifier (NBA=0, Euroleague=1, ...) |
 
 ## Bankroll Management
 
@@ -178,26 +190,28 @@ The model is not trying to predict exact margins — it's trying to produce **we
 | Source | Coverage | Cost |
 |--------|----------|------|
 | [nba_api](https://github.com/swar/nba_api) | NBA (20+ years of game logs) | Free |
+| [Flashscore](https://flashscore.com) (Playwright scraper) | 30+ international basketball leagues | Free |
 | SportsPlus.ph (Playwright scraper) | Winning margin odds for upcoming games | Free |
-| [Flashscore](https://flashscore.com) (Phase 2) | 500+ international basketball leagues | Free |
 | [API-Basketball](https://rapidapi.com/api-sports/api/api-basketball) (future) | 115+ leagues via REST API | $7.99/mo |
 
 ## Testing
 
 ```bash
-make test           # 85+ tests, ~5 seconds
+make test           # 107 unit tests, ~5 seconds
+make test-live      # 6 live integration tests (hits Flashscore, ~60s)
 make test-cov       # with coverage report
 make lint           # ruff linting
 ```
 
-Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invariants, Kelly boundary conditions, margin-to-bucket mapping, model train/predict/save/load, and team name mapping.
+Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invariants, Kelly boundary conditions, margin-to-bucket mapping, model train/predict/save/load, team name mapping, scraper date parsing, bucket regex, and **live DOM selector validation** against Flashscore (catches site structure changes).
 
 ## Roadmap
 
-### Phase 2: International Leagues
-- [ ] Flashscore scraper for historical results (VTB, EuroLeague, Argentina LNB, Brazil NBB, etc.)
-- [ ] League + team name fuzzy matching between SportsPlus ↔ Flashscore via `rapidfuzz`
-- [ ] `league_id` as categorical feature with league-specific σ parameters
+### ~~Phase 2: International Leagues~~ ✅
+- [x] Flashscore scraper for 30+ leagues (Euroleague, ACB, BBL, LNB, CBA, KBL, etc.)
+- [x] League + team name fuzzy matching between SportsPlus ↔ Flashscore via `rapidfuzz`
+- [x] `league_id` as categorical feature with per-league σ estimation
+- [x] Live integration tests to detect Flashscore DOM changes
 - [ ] SofaScore fallback when Flashscore scraping fails
 
 ### Phase 3: Backtesting & Calibration
