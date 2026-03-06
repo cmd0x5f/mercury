@@ -52,6 +52,15 @@ class TestParseFlashscoreDate:
         result = _parse_flashscore_date("")
         assert result == datetime.now().strftime("%Y-%m-%d")
 
+    def test_invalid_feb29_non_leap_year(self):
+        """Feb 29 in a non-leap year falls back to today."""
+        result = _parse_flashscore_date("29.02.2026")
+        assert result == datetime.now().strftime("%Y-%m-%d")
+
+    def test_valid_feb29_leap_year(self):
+        """Feb 29 in a leap year is valid."""
+        assert _parse_flashscore_date("29.02.2024") == "2024-02-29"
+
     def test_garbage_input(self):
         """Unparseable date falls back to today."""
         result = _parse_flashscore_date("no date here")

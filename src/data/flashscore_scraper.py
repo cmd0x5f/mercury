@@ -247,7 +247,15 @@ def _parse_flashscore_date(date_str: str) -> str:
                 if parsed > datetime.now():
                     year -= 1
             except ValueError:
-                pass
+                # Invalid date (e.g. Feb 30) — fall back to today
+                return datetime.now().strftime("%Y-%m-%d")
+
+        # Validate the final date (catches e.g. Feb 29 in non-leap years)
+        try:
+            datetime(year, month, day)
+        except ValueError:
+            return datetime.now().strftime("%Y-%m-%d")
+
         return f"{year:04d}-{month:02d}-{day:02d}"
 
     return datetime.now().strftime("%Y-%m-%d")
