@@ -1,10 +1,7 @@
 # Basketball Winning Margin Predictor Settings
 
 nba:
-  seasons:
-    - "2022-23"
-    - "2023-24"
-    - "2024-25"
+  first_season_year: 2022    # Auto-generates all seasons from here to current
   season_type: "Regular Season"
 
 model:

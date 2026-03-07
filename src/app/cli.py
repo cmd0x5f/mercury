@@ -32,13 +32,15 @@ def main(verbose):
 
 
 @main.command()
-@click.option("--seasons", "-s", multiple=True,
-              default=cfg("nba", "seasons", ["2022-23", "2023-24", "2024-25"]))
-def collect(seasons):
-    """Fetch NBA game data and store it."""
+def collect():
+    """Fetch NBA game data (auto-detects seasons) + latest from Flashscore."""
+    from src.data.nba_collector import generate_seasons
+
     store = DataStore()
-    df = collect_nba(list(seasons), store)
-    click.echo(f"Collected {len(df)} games across {len(seasons)} seasons")
+    seasons = generate_seasons()
+    click.echo(f"Collecting NBA seasons: {', '.join(seasons)}")
+    df = collect_nba(seasons, store)
+    click.echo(f"NBA: {len(df)} total games in DB (latest: {df['date'].max()})")
 
 
 @main.command("collect-leagues")

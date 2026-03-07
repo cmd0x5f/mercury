@@ -28,11 +28,10 @@ class TestConfig:
     def test_get_missing_section_returns_default(self):
         assert get("nonexistent_section", "key", "fallback") == "fallback"
 
-    def test_get_nba_seasons(self):
-        seasons = get("nba", "seasons")
-        assert isinstance(seasons, list)
-        assert len(seasons) >= 1
-        assert all(isinstance(s, str) for s in seasons)
+    def test_get_nba_first_season_year(self):
+        year = get("nba", "first_season_year")
+        assert isinstance(year, int)
+        assert 2000 <= year <= 2030
 
     def test_loads_missing_file_returns_empty(self):
         settings = load_settings(Path("/nonexistent/settings.yaml"))
