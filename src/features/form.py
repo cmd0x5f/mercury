@@ -2,14 +2,19 @@
 
 import pandas as pd
 
+from src.config import get as cfg
 
-def compute_rolling_margins(games: pd.DataFrame, window: int = 10) -> pd.DataFrame:
+
+def compute_rolling_margins(games: pd.DataFrame, window: int = None) -> pd.DataFrame:
     """Add rolling average absolute margin for each team (before each game).
 
     Returns games with added columns:
         home_avg_margin, away_avg_margin (rolling mean of absolute margins)
         home_avg_scored, away_avg_scored (rolling mean of points scored)
     """
+    if window is None:
+        window = cfg("model", "rolling_window", 10)
+
     games = games.copy().sort_values("date").reset_index(drop=True)
 
     # Build per-team rolling stats

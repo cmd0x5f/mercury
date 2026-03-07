@@ -16,7 +16,7 @@ source .venv/bin/activate
 ## Development Workflow
 
 ```bash
-make test           # run the test suite (85+ tests)
+make test           # run the test suite (160+ tests)
 make lint           # check code style with ruff
 make lint-fix       # auto-fix lint issues
 make test-cov       # tests with coverage report
@@ -43,8 +43,10 @@ src/
 Each module is fairly independent. The data flows like this:
 
 ```
-nba_api / scrapers → DataStore (SQLite) → feature builder → model → value calculator → CLI output
+nba_api / scrapers → DataStore (SQLite) → feature builder → model → Platt calibration → value calculator → CLI output
 ```
+
+Configuration is centralized in `config/settings.yaml` and loaded via `src/config.py`. Modules use `cfg("section", "key", default)` to read settings, with hardcoded fallbacks if the YAML is missing.
 
 ## Where to Contribute
 
@@ -56,9 +58,8 @@ nba_api / scrapers → DataStore (SQLite) → feature builder → model → valu
 
 ### Medium Effort
 
-- **Flashscore scraper** (Phase 2): Scrape international league results for broader coverage
-- **Platt scaling calibration** (Phase 3): Implement walk-forward probability calibration
 - **Backtest reporting:** Generate plots and detailed ROI analysis per bucket
+- **Edge threshold tuning:** Compare 3% / 5% / 7% / 10% thresholds vs ROI tradeoff
 
 ### Larger Projects
 
@@ -79,6 +80,8 @@ nba_api / scrapers → DataStore (SQLite) → feature builder → model → valu
 - **SQLite over Postgres:** Keeps the project portable and zero-config. The data volume (~10K games) doesn't need a server DB.
 - **XGBoost over neural nets:** Simpler, faster, more interpretable for tabular features. Easy to inspect feature importance.
 - **Folded normal distribution:** Converts a single point prediction into a full probability distribution over margin buckets. This is the key insight — see `src/model/distribution.py`.
+- **Platt scaling:** Calibrates raw bucket probabilities via logistic regression to correct systematic over/under-confidence. Fitted during `train` and applied automatically during prediction.
+- **Centralized config:** All tunable parameters in `config/settings.yaml`, loaded once via `src/config.py`. Modules accept `None` defaults and resolve from config at runtime, so explicit arguments still override.
 - **1/4 Kelly sizing:** Conservative stake sizing that sacrifices ~25% of theoretical growth for ~75% variance reduction. Important when model probabilities have estimation error.
 
 ## Questions?

@@ -2,6 +2,8 @@
 
 from dataclasses import dataclass
 
+from src.config import get as cfg
+
 
 @dataclass
 class BetOpportunity:
@@ -35,7 +37,7 @@ def find_value_bets(
     model_probs: dict[str, float],
     odds: dict[str, float],
     game_info: dict,
-    min_edge: float = 0.05,
+    min_edge: float = None,
 ) -> list[BetOpportunity]:
     """Compare model probabilities to book odds and find +EV bets.
 
@@ -48,6 +50,9 @@ def find_value_bets(
     Returns:
         list of BetOpportunity with edge >= min_edge
     """
+    if min_edge is None:
+        min_edge = cfg("betting", "edge_threshold", 0.05)
+
     bets = []
     for bucket in model_probs:
         if bucket not in odds:

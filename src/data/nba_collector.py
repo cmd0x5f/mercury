@@ -6,11 +6,12 @@ import time
 import pandas as pd
 from nba_api.stats.endpoints import LeagueGameLog
 
+from src.config import get as cfg
 from src.data.data_store import DataStore
 
 logger = logging.getLogger(__name__)
 
-SEASONS = ["2022-23", "2023-24", "2024-25"]
+SEASONS = cfg("nba", "seasons", ["2022-23", "2023-24", "2024-25"])
 
 
 def fetch_season(season: str, season_type: str = "Regular Season") -> pd.DataFrame:

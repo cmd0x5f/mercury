@@ -1,12 +1,14 @@
 """Kelly criterion stake sizing."""
 
+from src.config import get as cfg
+
 
 def kelly_stake(
     prob: float,
     decimal_odds: float,
-    fraction: float = 0.25,
-    min_stake_pct: float = 0.005,
-    max_stake_pct: float = 0.03,
+    fraction: float = None,
+    min_stake_pct: float = None,
+    max_stake_pct: float = None,
 ) -> float:
     """Calculate stake as fraction of bankroll using Kelly criterion.
 
@@ -23,6 +25,13 @@ def kelly_stake(
     Returns:
         Optimal stake as fraction of bankroll (0 if negative EV)
     """
+    if fraction is None:
+        fraction = cfg("betting", "kelly_fraction", 0.25)
+    if min_stake_pct is None:
+        min_stake_pct = cfg("betting", "min_stake_pct", 0.005)
+    if max_stake_pct is None:
+        max_stake_pct = cfg("betting", "max_stake_pct", 0.03)
+
     b = decimal_odds - 1  # net odds (profit per unit)
     q = 1 - prob
 
@@ -37,14 +46,21 @@ def kelly_stake(
 
 def calculate_stakes(
     bets: list,
-    bankroll: float,
-    fraction: float = 0.25,
-    max_exposure_pct: float = 0.15,
+    bankroll: float = None,
+    fraction: float = None,
+    max_exposure_pct: float = None,
 ) -> list[tuple]:
     """Calculate stakes for a set of bets with exposure limits.
 
     Returns list of (bet, stake_amount) tuples.
     """
+    if bankroll is None:
+        bankroll = cfg("betting", "default_bankroll", 10000)
+    if fraction is None:
+        fraction = cfg("betting", "kelly_fraction", 0.25)
+    if max_exposure_pct is None:
+        max_exposure_pct = cfg("betting", "max_exposure_pct", 0.15)
+
     results = []
     total_exposure = 0.0
 

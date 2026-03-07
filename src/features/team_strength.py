@@ -2,6 +2,8 @@
 
 import pandas as pd
 
+from src.config import get as cfg
+
 
 def expected_score(rating_a: float, rating_b: float) -> float:
     """Expected win probability for team A."""
@@ -10,8 +12,8 @@ def expected_score(rating_a: float, rating_b: float) -> float:
 
 def compute_elo_ratings(
     games: pd.DataFrame,
-    k: int = 20,
-    start_rating: float = 1500,
+    k: int = None,
+    start_rating: float = None,
     home_advantage: float = 100,
 ) -> pd.DataFrame:
     """Compute Elo ratings for all teams over a sequence of games.
@@ -20,6 +22,11 @@ def compute_elo_ratings(
         home_elo, away_elo (ratings BEFORE each game)
         elo_diff (home_elo + home_advantage - away_elo)
     """
+    if k is None:
+        k = cfg("model", "elo_k_factor", 20)
+    if start_rating is None:
+        start_rating = cfg("model", "elo_start", 1500)
+
     ratings: dict[str, float] = {}
     home_elos, away_elos = [], []
 

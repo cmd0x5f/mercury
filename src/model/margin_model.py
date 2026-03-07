@@ -10,6 +10,7 @@ import xgboost as xgb
 from sklearn.model_selection import TimeSeriesSplit
 
 from src.features.builder import FEATURE_COLS, build_features, get_feature_matrix
+from src.model.calibration import PlattCalibrator
 from src.model.distribution import BUCKET_NAMES, bucket_probabilities, bucket_probabilities_batch
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,7 @@ class MarginModel:
         self.sigma: float = 12.0  # global fallback σ
         self.league_sigmas: dict[int, float] = {}  # league_id -> σ
         self.league_categories: dict[str, int] = {}  # league_name -> league_id
+        self.calibrator: PlattCalibrator | None = None
 
     def _get_sigma(self, league_id: int | None = None) -> float:
         """Get σ for a league, falling back to global σ."""
@@ -79,6 +81,26 @@ class MarginModel:
                     league_resid = residuals[mask.values]
                     self.league_sigmas[int(lid)] = float(np.std(league_resid))
 
+        # Fit Platt calibrator on training predictions
+        self.calibrator = PlattCalibrator()
+        raw_probs = []
+        actual_buckets = []
+        for i, (pred_mu, actual_margin) in enumerate(zip(preds, y.values)):
+            lid = int(featured.iloc[i]["league_id"]) if "league_id" in featured.columns else None
+            sigma = self._get_sigma(lid)
+            raw_probs.append(bucket_probabilities(float(pred_mu), sigma))
+            actual_abs = abs(actual_margin)
+            actual_bucket = "31+"
+            for name, low, high in [("1-5",1,5),("6-10",6,10),("11-15",11,15),
+                                     ("16-20",16,20),("21-25",21,25),("26-30",26,30)]:
+                if low <= actual_abs <= high:
+                    actual_bucket = name
+                    break
+            actual_buckets.append(actual_bucket)
+        self.calibrator.fit(raw_probs, actual_buckets)
+        n_calibrated = len(self.calibrator.calibrators)
+        logger.info(f"Platt calibration fitted for {n_calibrated}/{len(BUCKET_NAMES)} buckets")
+
         league_info = ", ".join(
             f"{name}={self.league_sigmas.get(lid, self.sigma):.2f}"
             for name, lid in sorted(self.league_categories.items(), key=lambda x: x[1])
@@ -92,6 +114,12 @@ class MarginModel:
         """Predict signed margin for games."""
         return self.model.predict(features[FEATURE_COLS])
 
+    def _maybe_calibrate(self, probs: dict[str, float]) -> dict[str, float]:
+        """Apply Platt calibration if a calibrator is fitted."""
+        if self.calibrator and self.calibrator.calibrators:
+            return self.calibrator.calibrate(probs)
+        return probs
+
     def predict_buckets(self, features: pd.DataFrame) -> list[dict[str, float]]:
         """Predict bucket probabilities for games."""
         mus = self.predict_margin(features)
@@ -100,16 +128,18 @@ class MarginModel:
             results = []
             for mu, lid in zip(mus, features["league_id"].values):
                 sigma = self._get_sigma(int(lid))
-                results.append(bucket_probabilities(float(mu), sigma))
+                results.append(self._maybe_calibrate(
+                    bucket_probabilities(float(mu), sigma)
+                ))
             return results
-        return bucket_probabilities_batch(mus, self.sigma)
+        return [self._maybe_calibrate(p) for p in bucket_probabilities_batch(mus, self.sigma)]
 
     def predict_single(self, features: dict, league_id: int | None = None) -> dict[str, float]:
         """Predict bucket probabilities for a single game."""
         df = pd.DataFrame([features])
         mu = float(self.model.predict(df[FEATURE_COLS])[0])
         sigma = self._get_sigma(league_id if league_id is not None else features.get("league_id"))
-        return bucket_probabilities(mu, sigma)
+        return self._maybe_calibrate(bucket_probabilities(mu, sigma))
 
     def evaluate(self, games: pd.DataFrame, elo_k: int = 20) -> dict:
         """Walk-forward evaluation: train on games up to each point, predict next."""
@@ -194,6 +224,7 @@ class MarginModel:
                 "sigma": self.sigma,
                 "league_sigmas": self.league_sigmas,
                 "league_categories": self.league_categories,
+                "calibrator": self.calibrator,
             }, f)
         logger.info(f"Model saved to {path}")
 
@@ -205,6 +236,7 @@ class MarginModel:
         self.sigma = data["sigma"]
         self.league_sigmas = data.get("league_sigmas", {})
         self.league_categories = data.get("league_categories", {})
+        self.calibrator = data.get("calibrator")
         logger.info(f"Model loaded from {path}, global σ={self.sigma:.2f}")
         if self.league_sigmas:
             inv = {v: k for k, v in self.league_categories.items()}

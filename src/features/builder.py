@@ -2,6 +2,7 @@
 
 import pandas as pd
 
+from src.config import get as cfg
 from src.features.context import compute_context_features
 from src.features.form import compute_rolling_margins
 from src.features.team_strength import compute_elo_ratings
@@ -27,13 +28,16 @@ FEATURE_COLS = [
 TARGET_COL = "margin"  # home_score - away_score (signed)
 
 
-def build_features(games: pd.DataFrame, elo_k: int = 20) -> pd.DataFrame:
+def build_features(games: pd.DataFrame, elo_k: int = None) -> pd.DataFrame:
     """Build all features from raw game data.
 
     Input must have: date, home_team, away_team, home_score, away_score
     Optionally: league (defaults to 'NBA')
     Returns DataFrame with all feature columns + target.
     """
+    if elo_k is None:
+        elo_k = cfg("model", "elo_k_factor", 20)
+
     games = games.sort_values("date").reset_index(drop=True)
 
     # Ensure margin column exists

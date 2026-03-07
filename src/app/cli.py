@@ -6,6 +6,7 @@ import sys
 import click
 
 from src.betting.kelly import calculate_stakes
+from src.config import get as cfg
 from src.betting.tracker import BetTracker
 from src.betting.value_calculator import find_value_bets
 from src.data.data_store import DataStore
@@ -31,7 +32,8 @@ def main(verbose):
 
 
 @main.command()
-@click.option("--seasons", "-s", multiple=True, default=["2022-23", "2023-24", "2024-25"])
+@click.option("--seasons", "-s", multiple=True,
+              default=cfg("nba", "seasons", ["2022-23", "2023-24", "2024-25"]))
 def collect(seasons):
     """Fetch NBA game data and store it."""
     store = DataStore()
@@ -140,9 +142,12 @@ def scrape(headless):
 
 
 @main.command()
-@click.option("--bankroll", "-b", default=10000, help="Current bankroll")
-@click.option("--min-edge", "-e", default=0.05, help="Minimum edge threshold")
-@click.option("--kelly", "-k", default=0.25, help="Kelly fraction")
+@click.option("--bankroll", "-b", default=cfg("betting", "default_bankroll", 10000),
+              help="Current bankroll")
+@click.option("--min-edge", "-e", default=cfg("betting", "edge_threshold", 0.05),
+              help="Minimum edge threshold")
+@click.option("--kelly", "-k", default=cfg("betting", "kelly_fraction", 0.25),
+              help="Kelly fraction")
 @click.option("--date", "-d", default=None, help="Game date YYYY-MM-DD (default: latest)")
 def picks(bankroll, min_edge, kelly, date):
     """Show +EV picks by comparing model vs book odds."""

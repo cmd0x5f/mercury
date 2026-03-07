@@ -22,16 +22,17 @@ Total exposure:                                                 $  1,500 (15.0%)
 ## How It Works
 
 ```
-NBA Game Data → Feature Engineering → XGBoost Prediction → Folded Normal Distribution → Bucket Probabilities
-                                                                                              ↓
-SportsPlus Odds → Implied Probabilities ──────────────────────────────────→ Edge Calculation → +EV Picks
+NBA Game Data → Feature Engineering → XGBoost Prediction → Folded Normal Distribution → Platt Calibration → Bucket Probabilities
+                                                                                                                      ↓
+SportsPlus Odds → Implied Probabilities ──────────────────────────────────────────────→ Edge Calculation ────→ +EV Picks
 ```
 
 1. **Predict the signed margin** (e.g., "home team wins by 5") using an XGBoost model trained on NBA + 30 international leagues
 2. **Convert to a probability distribution** over absolute margin using a [folded normal distribution](https://en.wikipedia.org/wiki/Folded_normal_distribution) with per-league σ — the key insight is that |N(μ, σ)| naturally models "any team wins by X"
-3. **Scrape bookmaker odds** from SportsPlus.ph for the "Any Team Winning Margin" market
-4. **Find value** where model probability exceeds implied probability by a configurable threshold
-5. **Size bets** using 1/4 Kelly criterion with exposure caps
+3. **Calibrate probabilities** via [Platt scaling](https://en.wikipedia.org/wiki/Platt_scaling) — fits a logistic regression per bucket to correct systematic over/under-confidence
+4. **Scrape bookmaker odds** from SportsPlus.ph for the "Any Team Winning Margin" market
+5. **Find value** where model probability exceeds implied probability by a configurable threshold
+6. **Size bets** using 1/4 Kelly criterion with exposure caps
 
 ## Quick Start
 
@@ -137,19 +138,20 @@ sportsbetting/
 │   │   ├── context.py              # Rest days, back-to-backs, schedule position
 │   │   └── builder.py              # Combines all features + league_id encoding
 │   ├── model/
-│   │   ├── margin_model.py         # XGBoost regressor with per-league σ
+│   │   ├── margin_model.py         # XGBoost regressor with per-league σ + Platt calibration
 │   │   ├── distribution.py         # Folded normal → bucket probabilities
-│   │   └── calibration.py          # Platt scaling (Phase 3)
+│   │   └── calibration.py          # Platt scaling for probability calibration
 │   ├── betting/
 │   │   ├── value_calculator.py     # Edge = model_prob - implied_prob
 │   │   ├── kelly.py                # 1/4 Kelly criterion stake sizing
 │   │   └── tracker.py              # Bet recording and P&L tracking
 │   └── app/
 │       └── cli.py                  # Click CLI entry point
+│   config.py                       # Centralized settings loader (config/settings.yaml)
 ├── config/
-│   ├── settings.yaml               # Model + betting configuration
+│   ├── settings.yaml               # Model + betting configuration (single source of truth)
 │   └── league_mappings.yaml        # 30+ league → Flashscore URL mappings
-├── tests/                          # 120 unit tests + 6 live integration tests
+├── tests/                          # 160 unit tests + 6 live integration tests
 ├── data/                           # SQLite DB + saved models (gitignored)
 ├── notebooks/                      # Exploration notebooks
 ├── pyproject.toml
@@ -201,16 +203,37 @@ The model is not trying to predict exact margins — it's trying to produce **we
 | SportsPlus.ph (Playwright scraper) | Winning margin odds for upcoming games | Free |
 | [API-Basketball](https://rapidapi.com/api-sports/api/api-basketball) (future) | 115+ leagues via REST API | $7.99/mo |
 
+## Configuration
+
+All tunable parameters live in `config/settings.yaml`:
+
+```yaml
+model:
+  elo_k_factor: 20          # Elo K-factor
+  elo_start: 1500           # Starting Elo rating
+  rolling_window: 10        # Rolling stats window size
+
+betting:
+  edge_threshold: 0.05      # 5% minimum edge
+  kelly_fraction: 0.25      # 1/4 Kelly
+  min_stake_pct: 0.005      # 0.5% of bankroll
+  max_stake_pct: 0.03       # 3% of bankroll
+  max_exposure_pct: 0.15    # 15% total exposure
+  default_bankroll: 10000
+```
+
+CLI defaults and all modules read from this file via `src/config.py`. You can still override any value via CLI flags.
+
 ## Testing
 
 ```bash
-make test           # 120 unit tests, ~11 seconds
+make test           # 160 unit tests, ~13 seconds
 make test-live      # 6 live integration tests (hits Flashscore, ~60s)
 make test-cov       # with coverage report
 make lint           # ruff linting
 ```
 
-Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invariants, Kelly boundary conditions, margin-to-bucket mapping, model train/predict/save/load, team name mapping, scraper date parsing, retry logic, season discovery, bucket regex, and **live DOM selector validation** against Flashscore (catches site structure changes).
+Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invariants, Kelly boundary conditions, margin-to-bucket mapping, model train/predict/save/load, team name mapping, league + team fuzzy matching, Platt calibration, centralized config loading, scraper date parsing, retry logic, season discovery, bucket regex, and **live DOM selector validation** against Flashscore (catches site structure changes).
 
 ## Roadmap
 
@@ -227,8 +250,10 @@ Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invar
 - [ ] SofaScore fallback when Flashscore scraping fails
 
 ### Phase 3: Backtesting & Calibration
-- [ ] Walk-forward backtesting framework with proper train/test split
-- [ ] Platt scaling calibration for bucket probabilities
+- [x] Walk-forward backtesting framework with proper train/test split (`evaluate` command)
+- [x] Platt scaling calibration for bucket probabilities (auto-fitted during training)
+- [x] Centralized configuration via `config/settings.yaml`
+- [x] League + team fuzzy matching tests
 - [ ] Backtest reports: hit rate per bucket, ROI curve, max drawdown
 - [ ] Tune edge threshold (3% / 5% / 7% / 10%) vs number of bets vs ROI
 
