@@ -22,17 +22,21 @@ Total exposure:                                                 $  1,500 (15.0%)
 ## How It Works
 
 ```
-NBA Game Data → Feature Engineering → XGBoost Prediction → Folded Normal Distribution → Platt Calibration → Bucket Probabilities
-                                                                                                                      ↓
-SportsPlus Odds → Implied Probabilities ──────────────────────────────────────────────→ Edge Calculation ────→ +EV Picks
+Historical Game Data ─┐
+  NBA (nba_api)       ├→ Feature Engineering → XGBoost Prediction → Folded Normal → Platt Calibration → Bucket Probabilities
+  30 Leagues          │   (Elo, form, rest,    (signed margin)      (per-league σ)   (per-bucket LR)            ↓
+  (Flashscore)  ──────┘    schedule, league_id)                                                                 ↓
+                                                                                                                ↓
+SportsPlus Odds → Implied Probabilities ──────────────────────────────────→ Edge Calculation ──────────→ +EV Picks
 ```
 
-1. **Predict the signed margin** (e.g., "home team wins by 5") using an XGBoost model trained on NBA + 30 international leagues
-2. **Convert to a probability distribution** over absolute margin using a [folded normal distribution](https://en.wikipedia.org/wiki/Folded_normal_distribution) with per-league σ — the key insight is that |N(μ, σ)| naturally models "any team wins by X"
-3. **Calibrate probabilities** via [Platt scaling](https://en.wikipedia.org/wiki/Platt_scaling) — fits a logistic regression per bucket to correct systematic over/under-confidence
-4. **Scrape bookmaker odds** from SportsPlus.ph for the "Any Team Winning Margin" market
-5. **Find value** where model probability exceeds implied probability by a configurable threshold
-6. **Size bets** using 1/4 Kelly criterion with exposure caps
+1. **Collect game data** from multiple sources — NBA via `nba_api`, 30+ international leagues via Flashscore scraping. All stored in a single SQLite database.
+2. **Predict the signed margin** (e.g., "home team wins by 5") using an XGBoost model trained on all leagues combined, with `league_id` as a feature so the model learns league-specific patterns
+3. **Convert to a probability distribution** over absolute margin using a [folded normal distribution](https://en.wikipedia.org/wiki/Folded_normal_distribution) with per-league σ — the key insight is that |N(μ, σ)| naturally models "any team wins by X"
+4. **Calibrate probabilities** via [Platt scaling](https://en.wikipedia.org/wiki/Platt_scaling) — fits a logistic regression per bucket to correct systematic over/under-confidence
+5. **Scrape bookmaker odds** from SportsPlus.ph for the "Any Team Winning Margin" market
+6. **Find value** where model probability exceeds implied probability by a configurable threshold
+7. **Size bets** using 1/4 Kelly criterion with exposure caps
 
 ## Quick Start
 
