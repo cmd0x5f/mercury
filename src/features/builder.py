@@ -22,17 +22,30 @@ FEATURE_COLS = [
     "away_game_num",
     "is_b2b_home",
     "is_b2b_away",
+    "home_missing_impact",
+    "away_missing_impact",
     "league_id",
 ]
 
 TARGET_COL = "margin"  # home_score - away_score (signed)
 
 
-def build_features(games: pd.DataFrame, elo_k: int = None) -> pd.DataFrame:
+def build_features(
+    games: pd.DataFrame,
+    elo_k: int = None,
+    player_impact: pd.DataFrame = None,
+) -> pd.DataFrame:
     """Build all features from raw game data.
 
     Input must have: date, home_team, away_team, home_score, away_score
-    Optionally: league (defaults to 'NBA')
+    Optionally: league (defaults to 'NBA'), game_id (for player impact merge)
+
+    Args:
+        games: raw games DataFrame
+        elo_k: Elo K-factor override
+        player_impact: DataFrame with game_id, home_missing_impact, away_missing_impact
+            (output of compute_missing_impact). If None, defaults to 0.0.
+
     Returns DataFrame with all feature columns + target.
     """
     if elo_k is None:
@@ -62,6 +75,19 @@ def build_features(games: pd.DataFrame, elo_k: int = None) -> pd.DataFrame:
         parts.append(group)
 
     result = pd.concat(parts).sort_values("date").reset_index(drop=True)
+
+    # Merge player impact features
+    if player_impact is not None and "game_id" in result.columns:
+        result = result.merge(
+            player_impact[["game_id", "home_missing_impact", "away_missing_impact"]],
+            on="game_id",
+            how="left",
+        )
+        result["home_missing_impact"] = result["home_missing_impact"].fillna(0.0)
+        result["away_missing_impact"] = result["away_missing_impact"].fillna(0.0)
+    else:
+        result["home_missing_impact"] = 0.0
+        result["away_missing_impact"] = 0.0
 
     # Store the league category mapping for later use
     result.attrs["league_categories"] = dict(

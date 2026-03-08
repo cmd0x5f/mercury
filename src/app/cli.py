@@ -43,6 +43,25 @@ def collect():
     click.echo(f"NBA: {len(df)} total games in DB (latest: {df['date'].max()})")
 
 
+@main.command("collect-players")
+def collect_players():
+    """Fetch NBA player game logs for all seasons (needed for player impact features)."""
+    from src.data.nba_collector import generate_seasons
+    from src.features.player_impact import fetch_player_game_logs
+
+    store = DataStore()
+    seasons = generate_seasons()
+    total = 0
+    for season in seasons:
+        click.echo(f"  Fetching player logs for {season}...")
+        logs = fetch_player_game_logs(season)
+        inserted = store.upsert_player_logs(logs)
+        total += inserted
+        click.echo(f"    {inserted} new logs ({len(logs)} fetched)")
+
+    click.echo(f"Player logs: {total} new rows added")
+
+
 @main.command("collect-leagues")
 @click.option("--headless/--no-headless", default=True)
 @click.option("--clicks", "-c", default=20, help="Max 'Show more' clicks per league (stops early when exhausted)")
@@ -81,8 +100,18 @@ def collect_leagues(headless, clicks, parallel, seasons, incremental):
 
 @main.command()
 @click.option("--league", "-l", default=None, help="Train on single league (default: all)")
-def train(league):
+@click.option("--model", "-m", "backend", default="xgboost",
+              type=click.Choice(["xgboost", "ridge", "rf", "lightgbm"]),
+              help="ML backend (default: xgboost)")
+@click.option("--params", "-p", default=None,
+              help="Backend hyperparams as JSON (e.g. '{\"max_depth\": 4, \"n_estimators\": 200}')")
+def train(league, backend, params):
     """Train the margin prediction model."""
+    import json
+    from src.features.player_impact import compute_player_impact_scores, compute_missing_impact
+
+    backend_params = json.loads(params) if params else {}
+
     store = DataStore()
     games = store.get_games(league=league)
 
@@ -90,22 +119,44 @@ def train(league):
         click.echo("No games in database. Run 'collect' or 'collect-leagues' first.")
         sys.exit(1)
 
+    # Compute player impact if player logs are available
+    player_impact = None
+    player_logs = store.get_player_logs()
+    if not player_logs.empty:
+        click.echo(f"Computing player impact from {len(player_logs)} player logs...")
+        impact_scores = compute_player_impact_scores(player_logs)
+        player_impact = compute_missing_impact(games, impact_scores)
+        click.echo(f"  Player impact computed for {len(player_impact)} games")
+    else:
+        click.echo("No player logs found — training without player impact (run 'collect-players' to add)")
+
+    param_msg = f" | {len(backend_params)} custom params" if backend_params else ""
     leagues = games["league"].nunique()
-    click.echo(f"Training on {len(games)} games across {leagues} league(s)...")
-    model = MarginModel()
-    model.train(games)
+    click.echo(f"Training on {len(games)} games across {leagues} league(s) [{backend}{param_msg}]...")
+    model = MarginModel(backend_name=backend, backend_params=backend_params)
+    model.train(games, player_impact=player_impact)
     model.save()
-    click.echo(f"Model trained (global σ={model.sigma:.2f}) and saved")
-    if model.league_sigmas:
-        inv = {v: k for k, v in model.league_categories.items()}
-        for lid, s in model.league_sigmas.items():
-            click.echo(f"  {inv.get(lid, lid)}: σ={s:.2f}")
+    click.echo(f"Model trained and saved ({len(model.league_models)} separate + fallback)")
+    for name, lm in sorted(model.league_models.items()):
+        click.echo(f"  {name}: {lm.n_games} games, σ={lm.sigma:.2f}")
+    if model.fallback:
+        click.echo(f"  [fallback]: {model.fallback.n_games} games, σ={model.fallback.sigma:.2f}")
 
 
 @main.command()
 @click.option("--league", "-l", default=None, help="Evaluate single league (default: all)")
-def evaluate(league):
+@click.option("--model", "-m", "backend", default="xgboost",
+              type=click.Choice(["xgboost", "ridge", "rf", "lightgbm"]),
+              help="ML backend (default: xgboost)")
+@click.option("--params", "-p", default=None,
+              help="Backend hyperparams as JSON (e.g. '{\"max_depth\": 4}')")
+def evaluate(league, backend, params):
     """Run walk-forward evaluation on historical data."""
+    import json
+    from src.features.player_impact import compute_player_impact_scores, compute_missing_impact
+
+    backend_params = json.loads(params) if params else {}
+
     store = DataStore()
     games = store.get_games(league=league)
 
@@ -113,17 +164,83 @@ def evaluate(league):
         click.echo("No games in database. Run 'collect' first.")
         sys.exit(1)
 
-    click.echo(f"Evaluating on {len(games)} games with walk-forward CV...")
-    model = MarginModel()
-    results = model.evaluate(games)
+    # Compute player impact if available
+    player_impact = None
+    player_logs = store.get_player_logs()
+    if not player_logs.empty:
+        click.echo(f"Computing player impact from {len(player_logs)} player logs...")
+        impact_scores = compute_player_impact_scores(player_logs)
+        player_impact = compute_missing_impact(games, impact_scores)
 
-    click.echo("\nResults:")
+    click.echo(f"Evaluating on {len(games)} games with walk-forward CV [{backend}]...")
+    model = MarginModel(backend_name=backend, backend_params=backend_params)
+    results = model.evaluate(games, player_impact=player_impact)
+
+    click.echo("\nOverall Results:")
     click.echo(f"  MAE:  {results['mae']:.2f} points")
     click.echo(f"  RMSE: {results['rmse']:.2f} points")
     click.echo(f"  σ:    {results['sigma']:.2f}")
     click.echo("\nBucket accuracy (most-likely bucket correct):")
     for bucket, acc in results["bucket_accuracy"].items():
         click.echo(f"  {bucket:>5}: {acc:.1%}")
+
+    if results.get("per_league"):
+        click.echo(f"\n{'League':25s} {'Games':>6s} {'MAE':>7s} {'σ':>7s}")
+        click.echo("-" * 47)
+        for name, lr in sorted(results["per_league"].items(), key=lambda x: -x[1]["n_games"]):
+            click.echo(f"  {name:23s} {lr['n_games']:6d} {lr['mae']:7.2f} {lr['sigma']:7.2f}")
+
+
+@main.command()
+@click.option("--model", "-m", "backend", default="xgboost",
+              type=click.Choice(["xgboost", "ridge", "rf", "lightgbm"]),
+              help="ML backend to tune (default: xgboost)")
+@click.option("--trials", "-n", default=30, help="Number of Optuna trials (default: 30)")
+@click.option("--metric", default="mae", type=click.Choice(["mae", "rmse"]),
+              help="Metric to minimize (default: mae)")
+@click.option("--league", "-l", default=None, help="Tune on single league (default: all)")
+def tune(backend, trials, metric, league):
+    """Tune hyperparameters with Bayesian optimization (Optuna)."""
+    from src.features.player_impact import compute_player_impact_scores, compute_missing_impact
+    from src.model.tuner import tune as run_tune
+
+    store = DataStore()
+    games = store.get_games(league=league)
+
+    if games.empty:
+        click.echo("No games in database. Run 'collect' first.")
+        sys.exit(1)
+
+    # Compute player impact if available
+    player_impact = None
+    player_logs = store.get_player_logs()
+    if not player_logs.empty:
+        click.echo(f"Computing player impact from {len(player_logs)} player logs...")
+        impact_scores = compute_player_impact_scores(player_logs)
+        player_impact = compute_missing_impact(games, impact_scores)
+
+    click.echo(f"Tuning {backend} on {len(games)} games ({trials} trials, minimize {metric})...")
+    result = run_tune(
+        backend_name=backend,
+        games=games,
+        n_trials=trials,
+        metric=metric,
+        player_impact=player_impact,
+    )
+
+    import json
+
+    click.echo(f"\nBest {metric}: {result['best_value']:.4f}")
+    click.echo("Best hyperparameters:")
+    for k, v in sorted(result["best_params"].items()):
+        if isinstance(v, float):
+            click.echo(f"  {k}: {v:.6f}")
+        else:
+            click.echo(f"  {k}: {v}")
+
+    params_json = json.dumps(result["best_params"])
+    click.echo(f"\nTrain with these params:")
+    click.echo(f"  sbpicks train --model {backend} --params '{params_json}'")
 
 
 @main.command()
@@ -151,7 +268,11 @@ def scrape(headless):
 @click.option("--kelly", "-k", default=cfg("betting", "kelly_fraction", 0.25),
               help="Kelly fraction")
 @click.option("--date", "-d", default=None, help="Game date YYYY-MM-DD (default: latest)")
-def picks(bankroll, min_edge, kelly, date):
+@click.option("--out", "-o", default=None,
+              help="Comma-separated player names to mark as out (e.g., 'LeBron James,Steph Curry')")
+@click.option("--no-injuries", is_flag=True, default=False,
+              help="Skip fetching injury report (use 0.0 for all missing impact)")
+def picks(bankroll, min_edge, kelly, date, out, no_injuries):
     """Show +EV picks by comparing model vs book odds."""
     from src.data.league_matcher import LeagueMatcher, TeamMatcher
 
@@ -179,6 +300,27 @@ def picks(bankroll, min_edge, kelly, date):
         click.echo(f"No odds for {date}. Run 'scrape' first.")
         sys.exit(1)
 
+    # Fetch injury data for NBA games
+    injured_players: dict[str, list[str]] = {}
+    if not no_injuries:
+        from src.data.injury_scraper import get_injured_players
+        manual_out = [p.strip() for p in out.split(",")] if out else None
+        injured_players = get_injured_players(manual_out=manual_out)
+        if injured_players:
+            total_out = sum(len(v) for v in injured_players.values())
+            click.echo(f"Injury report: {total_out} players marked as out")
+        else:
+            click.echo("No injury data available — using default impact values")
+    elif out:
+        # Manual only, no auto-fetch
+        from src.data.injury_scraper import get_injured_players
+        manual_out = [p.strip() for p in out.split(",")]
+        injured_players = get_injured_players(
+            include_questionable=False, manual_out=manual_out
+        )
+        # Clear auto-fetched entries, keep only manual
+        injured_players = {k: v for k, v in injured_players.items()}
+
     # Set up league/team matching for international games
     league_matcher = LeagueMatcher()
     team_matcher = TeamMatcher()
@@ -190,6 +332,18 @@ def picks(bankroll, min_edge, kelly, date):
         sys.exit(1)
 
     featured = build_features(all_games)
+
+    # Pre-compute player impact scores for live injury adjustment
+    player_impact_lookup: dict[str, float] = {}
+    if injured_players:
+        from src.features.player_impact import compute_player_impact_scores
+        player_logs = store.get_player_logs()
+        if not player_logs.empty:
+            impact_scores = compute_player_impact_scores(player_logs)
+            valid = impact_scores.dropna(subset=["impact_score"])
+            # Get each player's latest impact score
+            for _, row in valid.sort_values("date").iterrows():
+                player_impact_lookup[row["player_name"].lower()] = row["impact_score"]
 
     # Register known teams per league from historical data
     for lg, group in all_games.groupby("league"):
@@ -251,6 +405,17 @@ def picks(bankroll, min_edge, kelly, date):
         h_gnum = lh["home_game_num"] if lh["home_team"] == home_mapped else lh["away_game_num"]
         a_gnum = la["away_game_num"] if la["away_team"] == away_mapped else la["home_game_num"]
 
+        # Compute missing impact from injury report
+        home_miss = 0.0
+        away_miss = 0.0
+        if injured_players and canonical_league == "NBA":
+            for pname in injured_players.get(home_mapped, []):
+                impact = player_impact_lookup.get(pname.lower(), 0.0)
+                home_miss += impact
+            for pname in injured_players.get(away_mapped, []):
+                impact = player_impact_lookup.get(pname.lower(), 0.0)
+                away_miss += impact
+
         features = {
             "home_elo": h_elo,
             "away_elo": a_elo,
@@ -265,6 +430,8 @@ def picks(bankroll, min_edge, kelly, date):
             "away_game_num": a_gnum,
             "is_b2b_home": 0,
             "is_b2b_away": 0,
+            "home_missing_impact": round(home_miss, 4),
+            "away_missing_impact": round(away_miss, 4),
             "league_id": league_id,
         }
 

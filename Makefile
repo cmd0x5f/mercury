@@ -1,4 +1,4 @@
-.PHONY: setup install test test-live lint collect collect-leagues train evaluate scrape picks clean help
+.PHONY: setup install test test-live lint collect collect-leagues train evaluate tune scrape picks clean help
 
 PYTHON = .venv/bin/python
 CLI = $(PYTHON) -m src.app.cli
@@ -40,8 +40,22 @@ collect-leagues: ## Scrape international league results from Flashscore
 train: ## Train the margin prediction model (all leagues)
 	$(CLI) -v train
 
+train-ridge: ## Train with Ridge backend
+	$(CLI) -v train --model ridge
+
+train-rf: ## Train with Random Forest backend
+	$(CLI) -v train --model rf
+
 evaluate: ## Run walk-forward backtesting
 	$(CLI) -v evaluate
+
+evaluate-all: ## Evaluate all backends side by side
+	@echo "=== XGBoost ===" && $(CLI) evaluate --model xgboost
+	@echo "\n=== Ridge ===" && $(CLI) evaluate --model ridge
+	@echo "\n=== Random Forest ===" && $(CLI) evaluate --model rf
+
+tune: ## Tune hyperparameters (default: xgboost, 30 trials)
+	$(CLI) -v tune
 
 scrape: ## Scrape winning margin odds from SportsPlus
 	$(CLI) -v scrape --no-headless

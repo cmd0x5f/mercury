@@ -41,7 +41,8 @@ class TestMarginModel:
     def test_train_sets_model_and_sigma(self, synthetic_games):
         model = MarginModel()
         model.train(synthetic_games)
-        assert model.model is not None
+        # With per-league models, check that at least one league model exists
+        assert len(model.league_models) > 0 or model.fallback is not None
         assert model.sigma > 0
         assert model.sigma < 30  # reasonable range
 
@@ -94,7 +95,7 @@ class TestMarginModel:
         loaded = MarginModel()
         loaded.load(path)
         assert loaded.sigma == pytest.approx(original_sigma)
-        assert loaded.model is not None
+        assert len(loaded.league_models) > 0 or loaded.fallback is not None
 
     def test_evaluate_returns_metrics(self, synthetic_games):
         model = MarginModel()
@@ -106,3 +107,24 @@ class TestMarginModel:
         assert "bucket_accuracy" in results
         assert results["mae"] > 0
         assert results["rmse"] >= results["mae"]  # RMSE >= MAE always
+
+    @pytest.mark.parametrize("backend_name", ["xgboost", "ridge", "rf"])
+    def test_train_with_different_backends(self, synthetic_games, backend_name):
+        model = MarginModel(backend_name=backend_name)
+        model.train(synthetic_games)
+        assert len(model.league_models) > 0 or model.fallback is not None
+        assert model.sigma > 0
+
+    def test_save_load_roundtrip_ridge(self, synthetic_games, tmp_path):
+        model = MarginModel(backend_name="ridge")
+        model.train(synthetic_games)
+        original_sigma = model.sigma
+
+        path = tmp_path / "model_ridge.pkl"
+        model.save(path)
+
+        loaded = MarginModel()
+        loaded.load(path)
+        assert loaded.backend_name == "ridge"
+        assert loaded.sigma == pytest.approx(original_sigma)
+        assert len(loaded.league_models) > 0 or loaded.fallback is not None

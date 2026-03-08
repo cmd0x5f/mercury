@@ -23,15 +23,15 @@ Total exposure:                                                 $  1,500 (15.0%)
 
 ```
 Historical Game Data ─┐
-  NBA (nba_api)       ├→ Feature Engineering → XGBoost Prediction → Folded Normal → Platt Calibration → Bucket Probabilities
-  30 Leagues          │   (Elo, form, rest,    (signed margin)      (per-league σ)   (per-bucket LR)            ↓
-  (Flashscore)  ──────┘    schedule, league_id)                                                                 ↓
-                                                                                                                ↓
+  NBA (nba_api)       ├→ Feature Engineering → Preprocessor → ML Backend → Folded Normal → Platt Calibration → Bucket Probabilities
+  30 Leagues          │   (Elo, form, rest,    (scale/one-hot   (XGBoost,    (per-league σ)   (per-bucket LR)            ↓
+  (Flashscore)  ──────┘    schedule, injuries)  per backend)    Ridge, RF)                                               ↓
+                                                                                                                         ↓
 SportsPlus Odds → Implied Probabilities ──────────────────────────────────→ Edge Calculation ──────────→ +EV Picks
 ```
 
 1. **Collect game data** from multiple sources — NBA via `nba_api`, 30+ international leagues via Flashscore scraping. All stored in a single SQLite database.
-2. **Predict the signed margin** (e.g., "home team wins by 5") using an XGBoost model trained on all leagues combined, with `league_id` as a feature so the model learns league-specific patterns
+2. **Predict the signed margin** (e.g., "home team wins by 5") using a pluggable ML backend (XGBoost, Ridge, Random Forest, or LightGBM) trained per league, with a configurable preprocessing layer that adapts to each backend's needs
 3. **Convert to a probability distribution** over absolute margin using a [folded normal distribution](https://en.wikipedia.org/wiki/Folded_normal_distribution) with per-league σ — the key insight is that |N(μ, σ)| naturally models "any team wins by X"
 4. **Calibrate probabilities** via [Platt scaling](https://en.wikipedia.org/wiki/Platt_scaling) — fits a logistic regression per bucket to correct systematic over/under-confidence
 5. **Scrape bookmaker odds** from SportsPlus.ph for the "Any Team Winning Margin" market
@@ -101,8 +101,10 @@ python -m src.app.cli --help
 Commands:
   collect          Fetch NBA game data and store it
   collect-leagues  Scrape international league results from Flashscore
+  collect-players  Fetch NBA player game logs (for injury impact features)
   train            Train the margin prediction model
   evaluate         Run walk-forward backtesting
+  tune             Tune hyperparameters with Bayesian optimization (Optuna)
   scrape           Scrape winning margin odds from SportsPlus
   picks            Show +EV picks with Kelly-sized stakes
   status           Show bet tracking P&L summary
@@ -115,13 +117,23 @@ Options for collect-leagues:
   --headless/--no-headless  Run browser headless (default: headless)
 
 Options for train/evaluate:
-  -l, --league    Train/evaluate on single league (default: all)
+  -l, --league          Train/evaluate on single league (default: all)
+  -m, --model BACKEND   ML backend: xgboost|ridge|rf|lightgbm (default: xgboost)
+  -p, --params JSON     Backend hyperparams as JSON string
+
+Options for tune:
+  -m, --model BACKEND   ML backend to tune (default: xgboost)
+  -n, --trials N        Number of Optuna trials (default: 30)
+  --metric mae|rmse     Metric to minimize (default: mae)
+  -l, --league          Tune on single league (default: all)
 
 Options for picks:
   -b, --bankroll  Current bankroll (default: 10000)
   -e, --min-edge  Minimum edge threshold (default: 0.05 = 5%)
   -k, --kelly     Kelly fraction (default: 0.25 = quarter Kelly)
   -d, --date      Game date YYYY-MM-DD (default: latest with odds)
+  --out           Comma-separated player names to mark as out
+  --no-injuries   Skip fetching injury report
 ```
 
 ## Project Structure
@@ -130,19 +142,30 @@ Options for picks:
 sportsbetting/
 ├── src/
 │   ├── data/
-│   │   ├── data_store.py           # SQLite storage for games, odds, bets
+│   │   ├── data_store.py           # SQLite storage for games, odds, bets, player logs
 │   │   ├── nba_collector.py        # NBA stats API data collection
 │   │   ├── flashscore_scraper.py   # Playwright scraper: retries, concurrency, historical seasons
 │   │   ├── sportsplus_scraper.py   # Playwright scraper for bookmaker odds
+│   │   ├── injury_scraper.py       # Rotowire injury report scraper
 │   │   ├── league_matcher.py       # Fuzzy league + team name matching (rapidfuzz)
 │   │   └── team_names.py           # NBA team name mapping
 │   ├── features/
 │   │   ├── team_strength.py        # Elo rating system (per-league)
 │   │   ├── form.py                 # Rolling margin & scoring averages
 │   │   ├── context.py              # Rest days, back-to-backs, schedule position
+│   │   ├── player_impact.py        # Player impact scores from game logs
 │   │   └── builder.py              # Combines all features + league_id encoding
 │   ├── model/
-│   │   ├── margin_model.py         # XGBoost regressor with per-league σ + Platt calibration
+│   │   ├── margin_model.py         # Per-league models with pluggable backends + Platt calibration
+│   │   ├── backends/               # ML backend registry (XGBoost, Ridge, RF, LightGBM)
+│   │   │   ├── __init__.py         # Lazy-import registry
+│   │   │   ├── base.py             # BaseBackend ABC + PreprocessingConfig
+│   │   │   ├── xgboost_backend.py  # XGBoost (default)
+│   │   │   ├── ridge_backend.py    # Ridge regression (scaling + one-hot)
+│   │   │   ├── rf_backend.py       # Random Forest
+│   │   │   └── lightgbm_backend.py # LightGBM (optional dependency)
+│   │   ├── preprocessor.py         # Configurable scaling + one-hot encoding per backend
+│   │   ├── tuner.py                # Optuna hyperparameter optimization
 │   │   ├── distribution.py         # Folded normal → bucket probabilities
 │   │   └── calibration.py          # Platt scaling for probability calibration
 │   ├── betting/
@@ -155,7 +178,7 @@ sportsbetting/
 ├── config/
 │   ├── settings.yaml               # Model + betting configuration (single source of truth)
 │   └── league_mappings.yaml        # 30+ league → Flashscore URL mappings
-├── tests/                          # 160 unit tests + 6 live integration tests
+├── tests/                          # 228 unit tests + 6 live integration tests
 ├── data/                           # SQLite DB + saved models (gitignored)
 ├── notebooks/                      # Exploration notebooks
 ├── pyproject.toml
@@ -174,6 +197,7 @@ sportsbetting/
 | `home_rest_days` / `away_rest_days` | Days since last game |
 | `home_game_num` / `away_game_num` | Season game count (schedule fatigue) |
 | `is_b2b_home` / `is_b2b_away` | Back-to-back flag (rest ≤ 1 day) |
+| `home_missing_impact` / `away_missing_impact` | Cumulative impact of injured/out players |
 | `league_id` | Categorical league identifier (NBA=0, Euroleague=1, ...) |
 
 ## Bankroll Management
@@ -231,13 +255,13 @@ CLI defaults and all modules read from this file via `src/config.py`. You can st
 ## Testing
 
 ```bash
-make test           # 160 unit tests, ~13 seconds
+make test           # 228 unit tests, ~15 seconds
 make test-live      # 6 live integration tests (hits Flashscore, ~60s)
 make test-cov       # with coverage report
 make lint           # ruff linting
 ```
 
-Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invariants, Kelly boundary conditions, margin-to-bucket mapping, model train/predict/save/load, team name mapping, league + team fuzzy matching, Platt calibration, centralized config loading, scraper date parsing, retry logic, season discovery, bucket regex, and **live DOM selector validation** against Flashscore (catches site structure changes).
+Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invariants, Kelly boundary conditions, margin-to-bucket mapping, model train/predict/save/load across multiple backends, backend registry, preprocessor transforms + serialization, Optuna search space sampling, team name mapping, league + team fuzzy matching, Platt calibration, centralized config loading, player impact scoring, injury scraping, scraper date parsing, retry logic, season discovery, bucket regex, and **live DOM selector validation** against Flashscore (catches site structure changes).
 
 ## Roadmap
 
@@ -261,14 +285,28 @@ Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invar
 - [ ] Backtest reports: hit rate per bucket, ROI curve, max drawdown
 - [ ] Tune edge threshold (3% / 5% / 7% / 10%) vs number of bets vs ROI
 
-### Phase 4: Dashboard & Automation
+### ~~Phase 4: Player Impact & Injury Awareness~~ ✅
+- [x] Player game log collection (`collect-players` command)
+- [x] Player impact scoring (weighted minutes, points, plus/minus)
+- [x] `home_missing_impact` / `away_missing_impact` features from injury data
+- [x] Rotowire injury report scraper (auto-fetched during `picks`)
+- [x] Manual `--out` flag for overriding injury data
+
+### ~~Phase 5: Modular Model Backends~~ ✅
+- [x] Pluggable ML backends: XGBoost (default), Ridge, Random Forest, LightGBM
+- [x] Per-backend preprocessing (tree models: passthrough; linear: scaling + one-hot)
+- [x] Backend registry with lazy imports (`--model` flag on `train`/`evaluate`)
+- [x] Hyperparameter tuning via Optuna Bayesian optimization (`tune` command)
+- [x] `--params` JSON flag for training with custom/tuned hyperparameters
+- [x] Backward-compatible model loading (v0 legacy, v1 per-league, v2 backend+preprocessor)
+
+### Phase 6: Dashboard & Automation
 - [ ] Streamlit dashboard with daily picks display
 - [ ] Cron job for automated daily scraping + prediction
 - [ ] Bet tracking UI with P&L history and charts
 - [ ] Line movement detection and alert system
 
-### Phase 5: Model Improvements
-- [ ] Add player-level features (injuries, rest, minutes load)
+### Phase 7: Model Improvements
 - [ ] Head-to-head history features
 - [ ] Pace-of-play and offensive/defensive rating features
 - [ ] Ensemble with a neural net or mixture-of-experts approach

@@ -20,6 +20,7 @@ dependencies = [
     "streamlit>=1.30",
     "pyyaml>=6.0",
     "click>=8.0",
+    "optuna>=4.7.0",
 ]
 
 [project.optional-dependencies]

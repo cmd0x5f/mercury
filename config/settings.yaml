@@ -9,6 +9,10 @@ model:
   elo_start: 1500
   rolling_window: 10
   train_min_games: 500
+  impact_w_minutes: 0.5       # Weight for minutes in player impact score
+  impact_w_points: 0.3        # Weight for points in player impact score
+  impact_w_plusminus: 0.2     # Weight for plus/minus in player impact score
+  impact_window: 15           # Rolling window for player impact average
 
 betting:
   edge_threshold: 0.05        # 5% minimum edge

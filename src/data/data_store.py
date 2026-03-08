@@ -40,6 +40,22 @@ CREATE TABLE IF NOT EXISTS odds (
     UNIQUE(source, game_date, home_team, away_team, bucket)
 );
 
+CREATE TABLE IF NOT EXISTS player_logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    player_id INTEGER NOT NULL,
+    player_name TEXT NOT NULL,
+    team TEXT NOT NULL,
+    game_id TEXT NOT NULL,
+    date TEXT NOT NULL,
+    minutes REAL NOT NULL,
+    points INTEGER NOT NULL,
+    plus_minus REAL NOT NULL,
+    UNIQUE(player_id, game_id)
+);
+
+CREATE INDEX IF NOT EXISTS idx_player_logs_game ON player_logs(game_id);
+CREATE INDEX IF NOT EXISTS idx_player_logs_team_date ON player_logs(team, date);
+
 CREATE TABLE IF NOT EXISTS bets (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     placed_at TEXT NOT NULL,
@@ -165,5 +181,39 @@ class DataStore:
         if status:
             query += " AND result = ?"
             params.append(status)
+        with self._conn() as conn:
+            return pd.read_sql(query, conn, params=params)
+
+    def upsert_player_logs(self, df: pd.DataFrame) -> int:
+        """Insert player game logs, skipping duplicates. Returns newly inserted count.
+
+        Expects columns:
+        player_id, player_name, team, game_id, date, minutes, points, plus_minus
+        """
+        with self._conn() as conn:
+            before = conn.execute("SELECT COUNT(*) FROM player_logs").fetchone()[0]
+            df.to_sql("_player_logs_staging", conn, if_exists="replace", index=False)
+            conn.execute("""
+                INSERT OR IGNORE INTO player_logs
+                    (player_id, player_name, team, game_id, date,
+                     minutes, points, plus_minus)
+                SELECT player_id, player_name, team, game_id, date,
+                       minutes, points, plus_minus
+                FROM _player_logs_staging
+            """)
+            conn.execute("DROP TABLE IF EXISTS _player_logs_staging")
+            after = conn.execute("SELECT COUNT(*) FROM player_logs").fetchone()[0]
+            return after - before
+
+    def get_player_logs(self, team: str = None, min_date: str = None) -> pd.DataFrame:
+        query = "SELECT * FROM player_logs WHERE 1=1"
+        params = []
+        if team:
+            query += " AND team = ?"
+            params.append(team)
+        if min_date:
+            query += " AND date >= ?"
+            params.append(min_date)
+        query += " ORDER BY date"
         with self._conn() as conn:
             return pd.read_sql(query, conn, params=params)
