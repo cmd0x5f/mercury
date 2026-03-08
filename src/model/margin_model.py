@@ -13,9 +13,9 @@ from sklearn.model_selection import TimeSeriesSplit
 
 from src.features.builder import FEATURE_COLS, build_features, get_feature_matrix
 from src.model.backends import DEFAULT_BACKEND, get_backend_class
-from src.model.backends.base import BaseBackend, PreprocessingConfig
+from src.model.backends.base import BaseBackend
 from src.model.calibration import PlattCalibrator
-from src.model.distribution import BUCKET_NAMES, bucket_probabilities, bucket_probabilities_batch
+from src.model.distribution import BUCKET_NAMES, bucket_probabilities
 from src.model.preprocessor import Preprocessor
 
 logger = logging.getLogger(__name__)
@@ -39,11 +39,22 @@ class _LeagueModel:
 
 class MarginModel:
     """Manages per-league models. Each league with enough data gets its
-    own model, σ, and Platt calibrator. Small leagues share a pooled model."""
+    own model, σ, and Platt calibrator. Small leagues share a pooled model.
 
-    def __init__(self, backend_name: str = DEFAULT_BACKEND, backend_params: dict | None = None):
+    Supports per-league backend selection via league_configs. If league_configs
+    is provided, each league can use a different ML backend + hyperparams.
+    """
+
+    def __init__(
+        self,
+        backend_name: str = DEFAULT_BACKEND,
+        backend_params: dict | None = None,
+        league_configs: dict | None = None,
+    ):
         self.backend_name = backend_name
         self.backend_params = backend_params or {}
+        # Per-league overrides: {league_name: {"backend_name": str, "backend_params": dict}}
+        self.league_configs = league_configs or {}
         self.league_models: dict[str, _LeagueModel] = {}  # league_name -> model
         self.fallback: _LeagueModel | None = None  # pooled model for small leagues
         self.league_categories: dict[str, int] = {}  # league_name -> league_id
@@ -74,8 +85,13 @@ class MarginModel:
             return self.fallback
         raise ValueError(f"No model for league '{league_name}' and no fallback model")
 
-    def _create_backend(self) -> BaseBackend:
-        """Create a fresh backend instance from the configured name + params."""
+    def _create_backend(self, league_name: str | None = None) -> BaseBackend:
+        """Create a fresh backend instance, respecting per-league overrides."""
+        if league_name and league_name in self.league_configs:
+            cfg = self.league_configs[league_name]
+            name = cfg.get("backend_name", self.backend_name)
+            params = cfg.get("backend_params", {})
+            return get_backend_class(name)(**params)
         return get_backend_class(self.backend_name)(**self.backend_params)
 
     def train(self, games: pd.DataFrame, elo_k: int = 20, player_impact: pd.DataFrame = None):
@@ -112,23 +128,26 @@ class MarginModel:
                     player_impact["game_id"].isin(lg_games["game_id"])
                 ]
 
-            lm = self._train_single(lg_games, elo_k, lg_impact)
+            lm = self._train_single(lg_games, elo_k, lg_impact, league_name=league)
             lm.n_games = len(lg_games)
             self.league_models[league] = lm
-            logger.info(f"  {league}: {len(lg_games)} games, σ={lm.sigma:.2f}")
+            backend_used = lm.backend.name()
+            logger.info(f"  {league}: {len(lg_games)} games, σ={lm.sigma:.2f} [{backend_used}]")
 
         # Train fallback model on pooled small leagues
         if small_leagues:
             small_games = games[games["league"].isin(small_leagues)].copy()
-            self.fallback = self._train_single(small_games, elo_k)
+            self.fallback = self._train_single(small_games, elo_k, league_name="__fallback__")
             self.fallback.n_games = len(small_games)
+            backend_used = self.fallback.backend.name()
             logger.info(
                 f"  Fallback ({len(small_leagues)} leagues): "
-                f"{len(small_games)} games, σ={self.fallback.sigma:.2f}"
+                f"{len(small_games)} games, σ={self.fallback.sigma:.2f} [{backend_used}]"
             )
 
     def _train_single(
-        self, games: pd.DataFrame, elo_k: int, player_impact: pd.DataFrame = None
+        self, games: pd.DataFrame, elo_k: int, player_impact: pd.DataFrame = None,
+        league_name: str | None = None,
     ) -> _LeagueModel:
         """Train a single model on a set of games."""
         featured = build_features(games, elo_k=elo_k, player_impact=player_impact)
@@ -140,7 +159,7 @@ class MarginModel:
         X, y = get_feature_matrix(featured)
 
         lm = _LeagueModel()
-        backend = self._create_backend()
+        backend = self._create_backend(league_name=league_name)
         preprocessor = Preprocessor(backend.preprocessing_config())
         X_proc = preprocessor.fit_transform(X)
 
@@ -247,7 +266,7 @@ class MarginModel:
                 X_train, y_train = get_feature_matrix(featured.iloc[train_idx])
                 X_test, y_test = get_feature_matrix(featured.iloc[test_idx])
 
-                backend = self._create_backend()
+                backend = self._create_backend(league_name=league)
                 preprocessor = Preprocessor(backend.preprocessing_config())
                 X_train_proc = preprocessor.fit_transform(X_train)
                 X_test_proc = preprocessor.transform(X_test)
@@ -302,10 +321,11 @@ class MarginModel:
         path.parent.mkdir(parents=True, exist_ok=True)
         with open(path, "wb") as f:
             pickle.dump({
-                "version": 2,
-                "backend_name": self.backend_name,
+                "version": 3,
+                "backend_name": self.backend_name,  # default backend
                 "league_models": {
                     name: {
+                        "backend_name": lm.backend.name(),
                         "backend_params": lm.backend.get_params(),
                         "preprocessor_state": lm.preprocessor.get_state(),
                         "sigma": lm.sigma,
@@ -315,6 +335,7 @@ class MarginModel:
                     for name, lm in self.league_models.items()
                 },
                 "fallback": {
+                    "backend_name": self.fallback.backend.name(),
                     "backend_params": self.fallback.backend.get_params(),
                     "preprocessor_state": self.fallback.preprocessor.get_state(),
                     "sigma": self.fallback.sigma,
@@ -331,24 +352,14 @@ class MarginModel:
             data = pickle.load(f)
 
         self.league_categories = data.get("league_categories", {})
-        version = data.get("version", 0)
-
-        if version >= 2:
-            self._load_v2(data)
-        elif "league_models" in data:
-            self._load_v1(data)
-        else:
-            self._load_v0(data)
-
-    def _load_v2(self, data: dict):
-        """Load format v2: backend + preprocessor per league."""
-        self.backend_name = data["backend_name"]
-        backend_cls = get_backend_class(self.backend_name)
+        self.backend_name = data.get("backend_name", DEFAULT_BACKEND)
 
         self.league_models = {}
         for name, lm_data in data.get("league_models", {}).items():
             lm = _LeagueModel()
-            lm.backend = backend_cls.from_params(lm_data["backend_params"])
+            lm_backend_name = lm_data.get("backend_name", self.backend_name)
+            lm_cls = get_backend_class(lm_backend_name)
+            lm.backend = lm_cls.from_params(lm_data["backend_params"])
             lm.preprocessor = Preprocessor.from_state(lm_data["preprocessor_state"])
             lm.sigma = lm_data["sigma"]
             lm.calibrator = lm_data.get("calibrator")
@@ -358,57 +369,19 @@ class MarginModel:
         fb_data = data.get("fallback")
         if fb_data:
             self.fallback = _LeagueModel()
-            self.fallback.backend = backend_cls.from_params(fb_data["backend_params"])
+            fb_backend_name = fb_data.get("backend_name", self.backend_name)
+            fb_cls = get_backend_class(fb_backend_name)
+            self.fallback.backend = fb_cls.from_params(fb_data["backend_params"])
             self.fallback.preprocessor = Preprocessor.from_state(fb_data["preprocessor_state"])
             self.fallback.sigma = fb_data["sigma"]
             self.fallback.calibrator = fb_data.get("calibrator")
             self.fallback.n_games = fb_data.get("n_games", 0)
 
         league_info = ", ".join(
-            f"{name}(σ={lm.sigma:.2f})"
+            f"{name}[{lm.backend.name()}](σ={lm.sigma:.2f})"
             for name, lm in self.league_models.items()
         )
-        logger.info(f"Loaded {len(self.league_models)} league models [{self.backend_name}]: {league_info}")
-
-    def _load_v1(self, data: dict):
-        """Load format v1: per-league pickle with raw xgb models."""
-        self.backend_name = "xgboost"
-        from src.model.backends.xgboost_backend import XGBoostBackend
-
-        self.league_models = {}
-        for name, lm_data in data.get("league_models", {}).items():
-            lm = _LeagueModel()
-            lm.backend = XGBoostBackend.from_params({"model": lm_data["model"]})
-            # v1 had no preprocessor — XGBoost needs no transforms
-            lm.preprocessor = Preprocessor(PreprocessingConfig())
-            lm.sigma = lm_data["sigma"]
-            lm.calibrator = lm_data.get("calibrator")
-            lm.n_games = lm_data.get("n_games", 0)
-            self.league_models[name] = lm
-
-        fb_data = data.get("fallback")
-        if fb_data:
-            self.fallback = _LeagueModel()
-            self.fallback.backend = XGBoostBackend.from_params({"model": fb_data["model"]})
-            self.fallback.preprocessor = Preprocessor(PreprocessingConfig())
-            self.fallback.sigma = fb_data["sigma"]
-            self.fallback.calibrator = fb_data.get("calibrator")
-            self.fallback.n_games = fb_data.get("n_games", 0)
-
-        logger.info(f"Loaded v1 model ({len(self.league_models)} leagues, upgraded to backend format)")
-
-    def _load_v0(self, data: dict):
-        """Load format v0: legacy single-model format."""
-        self.backend_name = "xgboost"
-        from src.model.backends.xgboost_backend import XGBoostBackend
-
-        logger.info("Loading legacy single-model format")
-        lm = _LeagueModel()
-        lm.backend = XGBoostBackend.from_params({"model": data["model"]})
-        lm.preprocessor = Preprocessor(PreprocessingConfig())
-        lm.sigma = data["sigma"]
-        lm.calibrator = data.get("calibrator")
-        self.fallback = lm
+        logger.info(f"Loaded model ({len(self.league_models)} leagues): {league_info}")
 
     def get_league_id(self, league_name: str) -> int:
         """Look up a league_id from a league name. Returns 0 if unknown."""

@@ -57,6 +57,9 @@ evaluate-all: ## Evaluate all backends side by side
 tune: ## Tune hyperparameters (default: xgboost, 30 trials)
 	$(CLI) -v tune
 
+auto-tune: ## Auto-select best backend per league + tune hyperparams
+	$(CLI) -v auto-tune
+
 scrape: ## Scrape winning margin odds from SportsPlus
 	$(CLI) -v scrape --no-headless
 

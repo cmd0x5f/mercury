@@ -243,12 +243,96 @@ def tune(backend, trials, metric, league):
     click.echo(f"  sbpicks train --model {backend} --params '{params_json}'")
 
 
+@main.command("auto-tune")
+@click.option("--trials", "-n", default=20, help="Optuna trials per league (default: 20)")
+@click.option("--metric", default="mae", type=click.Choice(["mae", "rmse"]),
+              help="Metric to minimize (default: mae)")
+@click.option("--no-tune", is_flag=True, default=False,
+              help="Only compare backends, skip Optuna tuning")
+def auto_tune(trials, metric, no_tune):
+    """Auto-select the best backend per league, then tune its hyperparameters.
+
+    For each league: compares all backends via walk-forward CV, picks the
+    winner, then runs Optuna to tune the winner's hyperparameters. Trains
+    and saves the final model with per-league backend configs.
+    """
+    from src.features.player_impact import compute_player_impact_scores, compute_missing_impact
+    from src.model.auto_tuner import auto_tune as run_auto_tune
+
+    store = DataStore()
+    games = store.get_games()
+
+    if games.empty:
+        click.echo("No games in database. Run 'collect' first.")
+        sys.exit(1)
+
+    # Compute player impact if available
+    player_impact = None
+    player_logs = store.get_player_logs()
+    if not player_logs.empty:
+        click.echo(f"Computing player impact from {len(player_logs)} player logs...")
+        impact_scores = compute_player_impact_scores(player_logs)
+        player_impact = compute_missing_impact(games, impact_scores)
+
+    tune_trials = 0 if no_tune else trials
+    leagues = games["league"].nunique()
+    click.echo(f"Auto-tuning across {len(games)} games, {leagues} league(s)...")
+    click.echo(f"  Phase 1: Compare backends per league (walk-forward CV)")
+    if tune_trials > 0:
+        click.echo(f"  Phase 2: Tune winner per league ({tune_trials} Optuna trials each)")
+
+    configs = run_auto_tune(
+        games=games,
+        tune_trials=tune_trials,
+        metric=metric,
+        player_impact=player_impact,
+    )
+
+    # Display results
+    click.echo(f"\n{'='*70}")
+    click.echo("  AUTO-TUNE RESULTS")
+    click.echo(f"{'='*70}")
+    click.echo(f"{'League':25s} {'Backend':>10s} {'CV ' + metric:>10s} {'Tuned ' + metric:>12s}")
+    click.echo("-" * 60)
+    for name, cfg in sorted(configs.items()):
+        if name == "__fallback__":
+            label = "[fallback]"
+        else:
+            label = name
+        tuned = f"{cfg.tuned_score:.4f}" if cfg.tuned_score > 0 else "—"
+        click.echo(f"  {label:23s} {cfg.backend_name:>10s} {cfg.cv_score:10.4f} {tuned:>12s}")
+
+    # Build league_configs dict for MarginModel
+    league_configs = {}
+    for name, cfg in configs.items():
+        league_configs[name] = {
+            "backend_name": cfg.backend_name,
+            "backend_params": cfg.backend_params,
+        }
+
+    # Train final model with per-league configs
+    click.echo(f"\nTraining final model with per-league backends...")
+    model = MarginModel(league_configs=league_configs)
+    model.train(games, player_impact=player_impact)
+    model.save()
+
+    click.echo(f"\nFinal model saved ({len(model.league_models)} leagues):")
+    for name, lm in sorted(model.league_models.items()):
+        click.echo(f"  {name}: {lm.n_games} games, σ={lm.sigma:.2f} [{lm.backend.name()}]")
+    if model.fallback:
+        click.echo(
+            f"  [fallback]: {model.fallback.n_games} games, "
+            f"σ={model.fallback.sigma:.2f} [{model.fallback.backend.name()}]"
+        )
+
+
 @main.command()
 @click.option("--headless/--no-headless", default=True)
-def scrape(headless):
+@click.option("--parallel", "-p", default=4, help="Number of games to scrape concurrently (default: 4)")
+def scrape(headless, parallel):
     """Scrape winning margin odds from SportsPlus."""
     store = DataStore()
-    df = scrape_odds_sync(headless=headless)
+    df = scrape_odds_sync(headless=headless, concurrency=parallel)
 
     if df.empty:
         click.echo("No odds found")

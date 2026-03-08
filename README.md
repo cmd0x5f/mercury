@@ -31,7 +31,7 @@ SportsPlus Odds → Implied Probabilities ────────────�
 ```
 
 1. **Collect game data** from multiple sources — NBA via `nba_api`, 30+ international leagues via Flashscore scraping. All stored in a single SQLite database.
-2. **Predict the signed margin** (e.g., "home team wins by 5") using a pluggable ML backend (XGBoost, Ridge, Random Forest, or LightGBM) trained per league, with a configurable preprocessing layer that adapts to each backend's needs
+2. **Predict the signed margin** (e.g., "home team wins by 5") using a pluggable ML backend trained per league — `auto-tune` evaluates all backends (XGBoost, Ridge, RF) per league via walk-forward CV, picks the best, and tunes its hyperparameters with Optuna
 3. **Convert to a probability distribution** over absolute margin using a [folded normal distribution](https://en.wikipedia.org/wiki/Folded_normal_distribution) with per-league σ — the key insight is that |N(μ, σ)| naturally models "any team wins by X"
 4. **Calibrate probabilities** via [Platt scaling](https://en.wikipedia.org/wiki/Platt_scaling) — fits a logistic regression per bucket to correct systematic over/under-confidence
 5. **Scrape bookmaker odds** from SportsPlus.ph for the "Any Team Winning Margin" market
@@ -76,10 +76,13 @@ make collect
 # Step 1b: Collect international league data from Flashscore (current + 2 past seasons)
 python -m src.app.cli collect-leagues --seasons 2 --parallel 3
 
-# Step 2: Train the model (NBA-only or all leagues)
-make train
+# Step 2: Auto-tune + train (picks best backend per league, tunes hyperparams)
+make auto-tune
 
-# Step 3: Scrape today's odds from SportsPlus (~10 min for full slate)
+# Or train with a single backend:
+# make train
+
+# Step 3: Scrape today's odds from SportsPlus (~3 min with parallel scraping)
 make scrape
 
 # Step 4: See picks
@@ -105,6 +108,7 @@ Commands:
   train            Train the margin prediction model
   evaluate         Run walk-forward backtesting
   tune             Tune hyperparameters with Bayesian optimization (Optuna)
+  auto-tune        Auto-select best backend per league + tune hyperparams
   scrape           Scrape winning margin odds from SportsPlus
   picks            Show +EV picks with Kelly-sized stakes
   status           Show bet tracking P&L summary
@@ -127,6 +131,15 @@ Options for tune:
   --metric mae|rmse     Metric to minimize (default: mae)
   -l, --league          Tune on single league (default: all)
 
+Options for auto-tune:
+  -n, --trials N        Optuna trials per league (default: 20)
+  --metric mae|rmse     Metric to minimize (default: mae)
+  --no-tune             Only compare backends, skip Optuna tuning
+
+Options for scrape:
+  -p, --parallel N      Games to scrape concurrently (default: 3)
+  --headless/--no-headless  Run browser headless (default: headless)
+
 Options for picks:
   -b, --bankroll  Current bankroll (default: 10000)
   -e, --min-edge  Minimum edge threshold (default: 0.05 = 5%)
@@ -145,7 +158,7 @@ sportsbetting/
 │   │   ├── data_store.py           # SQLite storage for games, odds, bets, player logs
 │   │   ├── nba_collector.py        # NBA stats API data collection
 │   │   ├── flashscore_scraper.py   # Playwright scraper: retries, concurrency, historical seasons
-│   │   ├── sportsplus_scraper.py   # Playwright scraper for bookmaker odds
+│   │   ├── sportsplus_scraper.py   # Playwright scraper for bookmaker odds (parallel + retry)
 │   │   ├── injury_scraper.py       # Rotowire injury report scraper
 │   │   ├── league_matcher.py       # Fuzzy league + team name matching (rapidfuzz)
 │   │   └── team_names.py           # NBA team name mapping
@@ -166,6 +179,7 @@ sportsbetting/
 │   │   │   └── lightgbm_backend.py # LightGBM (optional dependency)
 │   │   ├── preprocessor.py         # Configurable scaling + one-hot encoding per backend
 │   │   ├── tuner.py                # Optuna hyperparameter optimization
+│   │   ├── auto_tuner.py           # Per-league backend selection + auto-tuning pipeline
 │   │   ├── distribution.py         # Folded normal → bucket probabilities
 │   │   └── calibration.py          # Platt scaling for probability calibration
 │   ├── betting/
@@ -178,7 +192,7 @@ sportsbetting/
 ├── config/
 │   ├── settings.yaml               # Model + betting configuration (single source of truth)
 │   └── league_mappings.yaml        # 30+ league → Flashscore URL mappings
-├── tests/                          # 228 unit tests + 6 live integration tests
+├── tests/                          # 239 unit tests + 6 live integration tests
 ├── data/                           # SQLite DB + saved models (gitignored)
 ├── notebooks/                      # Exploration notebooks
 ├── pyproject.toml
@@ -255,13 +269,13 @@ CLI defaults and all modules read from this file via `src/config.py`. You can st
 ## Testing
 
 ```bash
-make test           # 228 unit tests, ~15 seconds
+make test           # 239 unit tests, ~15 seconds
 make test-live      # 6 live integration tests (hits Flashscore, ~60s)
 make test-cov       # with coverage report
 make lint           # ruff linting
 ```
 
-Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invariants, Kelly boundary conditions, margin-to-bucket mapping, model train/predict/save/load across multiple backends, backend registry, preprocessor transforms + serialization, Optuna search space sampling, team name mapping, league + team fuzzy matching, Platt calibration, centralized config loading, player impact scoring, injury scraping, scraper date parsing, retry logic, season discovery, bucket regex, and **live DOM selector validation** against Flashscore (catches site structure changes).
+Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invariants, Kelly boundary conditions, margin-to-bucket mapping, model train/predict/save/load across multiple backends, backend registry, preprocessor transforms + serialization, Optuna search space sampling, team name mapping, league + team fuzzy matching, Platt calibration, centralized config loading, player impact scoring, injury scraping, scraper date parsing, retry logic, season discovery, bucket regex, per-league backend selection, mixed-backend save/load roundtrip, auto-tune pipeline, rate-limit error handling, and **live DOM selector validation** against Flashscore (catches site structure changes).
 
 ## Roadmap
 
@@ -292,13 +306,15 @@ Tests cover: data store CRUD, Elo math properties, distribution sum-to-one invar
 - [x] Rotowire injury report scraper (auto-fetched during `picks`)
 - [x] Manual `--out` flag for overriding injury data
 
-### ~~Phase 5: Modular Model Backends~~ ✅
+### ~~Phase 5: Modular Model Backends + Auto-Tuning~~ ✅
 - [x] Pluggable ML backends: XGBoost (default), Ridge, Random Forest, LightGBM
 - [x] Per-backend preprocessing (tree models: passthrough; linear: scaling + one-hot)
 - [x] Backend registry with lazy imports (`--model` flag on `train`/`evaluate`)
 - [x] Hyperparameter tuning via Optuna Bayesian optimization (`tune` command)
 - [x] `--params` JSON flag for training with custom/tuned hyperparameters
-- [x] Backward-compatible model loading (v0 legacy, v1 per-league, v2 backend+preprocessor)
+- [x] **Per-league auto-tune** (`auto-tune` command): compares all backends per league via walk-forward CV, selects the best, tunes its hyperparams with Optuna, trains final model with per-league configs
+- [x] Per-league backend storage — different leagues can use different ML backends in a single saved model
+- [x] **Parallel odds scraping** — concurrent game pages with retry pass for rate-limited requests (~4x faster)
 
 ### Phase 6: Dashboard & Automation
 - [ ] Streamlit dashboard with daily picks display

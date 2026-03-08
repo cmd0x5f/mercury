@@ -26,6 +26,7 @@ from src.data.flashscore_scraper import (
 )
 from src.data.sportsplus_scraper import (
     BUCKET_PATTERN,
+    MarketsNotLoadedError,
     _extract_margins_from_text,
     get_game_links,
     scrape_margin_odds,
@@ -484,12 +485,35 @@ async def test_scrape_margin_odds_no_section():
     page.wait_for_timeout = AsyncMock()
     page.query_selector = AsyncMock(return_value=None)  # no terms dialog
     page.evaluate = AsyncMock(return_value=False)  # section not found
+    page.close = AsyncMock()
+
+    context = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
 
     game = {"url": "https://sportsplus.ph/sbk/m/123",
             "home_team": "Team A", "away_team": "Team B",
             "league": "NBA"}
-    odds = await scrape_margin_odds(page, game)
+    odds = await scrape_margin_odds(context, game)
     assert odds == []
+
+
+@pytest.mark.asyncio
+async def test_scrape_margin_odds_markets_not_loaded():
+    """When markets don't render (rate-limited), raises MarketsNotLoadedError."""
+    page = AsyncMock()
+    page.goto = AsyncMock()
+    page.query_selector = AsyncMock(return_value=None)
+    page.wait_for_selector = AsyncMock(side_effect=Exception("Timeout"))
+    page.close = AsyncMock()
+
+    context = AsyncMock()
+    context.new_page = AsyncMock(return_value=page)
+
+    game = {"url": "https://sportsplus.ph/sbk/m/123",
+            "home_team": "Team A", "away_team": "Team B",
+            "league": "NBA"}
+    with pytest.raises(MarketsNotLoadedError):
+        await scrape_margin_odds(context, game)
 
 
 @pytest.mark.asyncio

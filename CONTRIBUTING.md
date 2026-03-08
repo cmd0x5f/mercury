@@ -16,7 +16,7 @@ source .venv/bin/activate
 ## Development Workflow
 
 ```bash
-make test           # run the test suite (228+ tests)
+make test           # run the test suite (239+ tests)
 make lint           # check code style with ruff
 make lint-fix       # auto-fix lint issues
 make test-cov       # tests with coverage report
